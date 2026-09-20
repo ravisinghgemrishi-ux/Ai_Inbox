@@ -1,35 +1,27 @@
 # GemRishi AI Inbox — Instagram/Facebook + WhatsApp auto-reply & lead qualification
 
-**Phase 1 hardening in progress.** The production service is deployed on Vercel and the source of truth is the `main` branch of this repository.
+**Phase 2 active.** Phase 1 webhook hardening is preserved; Phase 2 adds conversation memory, intent routing, live-product lookup adapter, structured lead context, and human-handoff foundations.
 
-## Phase 1 scope
+## Phase 1 guarantees
+- one inbound customer comment/message -> one processing claim;
+- Redis-backed duplicate protection;
+- own-account comment filtering to prevent self-reply loops;
+- Zernio comment reply idempotency;
+- bounded Gemini retries;
+- price-safety guard;
+- human acknowledgement on escalation cases.
 
-This service receives inbound Instagram/Facebook comments and messages, and WhatsApp messages, through Zernio; generates a short GemRishi reply and lead classification with Gemini; sends the reply through Zernio when appropriate; and records the interaction through the configured lead logger.
+## Phase 2 architecture
+Customer -> Zernio -> webhook -> Redis idempotency -> intent/context layer -> live product lookup -> conversation memory -> Gemini/Mannat -> reply -> lead log/CRM.
 
-Recent hardening includes:
-- signed webhook validation in production;
-- Redis-backed duplicate-event protection when Redis REST credentials are present;
-- awaited webhook processing rather than deliberately detaching work after the HTTP response;
-- Zernio reply idempotency for comment replies;
-- bounded retries for transient Gemini failures;
-- explicit handling for missing Gemini/Zernio credentials;
-- live-price-only instructions for the AI (handbook/reference prices are not current selling prices);
-- bounded lead-log HTTP timeout and HTTP-status checking.
+### Conversation memory
+Recent customer turns are stored in Redis and passed back to Gemini so follow-up questions such as "iska price?", "Nepali wala hai?", or "how to order?" can be answered in context without making the customer repeat themselves.
 
-## Current production status
+### Intent routing
+The webhook now prepares deterministic intent context for product/price/recommendation/authenticity/order/return/complaint/consultation/general requests. Gemini remains responsible for the final natural-language response and lead classification.
 
-The latest production deployments have been building successfully, but runtime logs showed Gemini 429 quota exhaustion and some transient `fetch failed` errors. The code now retries transient failures with bounded backoff and falls back safely instead of sending an invented product price.
+### Live product lookup
+The code supports a `GEMRISH_PRODUCT_API_URL` adapter. The endpoint must return a product or product list containing current availability, price, title, URL, and relevant details. Until a verified GemRishi product API endpoint is connected, the bot continues to use the safe no-live-price behavior rather than inventing a price.
 
 ## Configuration
-
-Required production secrets/configuration are kept in Vercel environment variables and are never committed to this repository. See `.env.example` for variable names.
-
-For the actual social accounts to receive events, Zernio must have the intended Instagram, Facebook Page, and WhatsApp Business accounts connected and the webhook must be registered for `comment.received` and `message.received`.
-
-## Price safety
-
-The AI must not treat Rudraksha Handbook indicative prices or historical catalog notes as current website selling prices. Current prices should only be supplied through a future live-product-data lookup. Until that lookup exists and returns a matching product, the safe response is to confirm the exact current price with the team and qualify the inquiry as appropriate.
-
-## Phase 2
-
-After Phase 1 is verified end-to-end, the next architecture will add live GemRishi/Rudraksha product lookup, conversation memory, richer intent routing, structured lead/CRM data, and stronger human-handoff workflows. These changes are intentionally not being mixed into Phase 1 unnecessarily.
+See `.env.example`. Secrets are never committed.
