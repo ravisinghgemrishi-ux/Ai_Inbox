@@ -1,7 +1,7 @@
 {
   "name": "gemrishi-ai-inbox",
-  "version": "0.1.0",
-  "description": "Auto-reply + lead qualification for GemRishi's Instagram/Facebook comments & DMs and WhatsApp messages, via Zernio webhooks and Claude.",
+  "version": "0.1.1",
+  "description": "GemRishi social inbox auto-reply and lead qualification service via Zernio webhooks and Gemini.",
   "main": "api/webhook.js",
   "type": "commonjs",
   "scripts": {
