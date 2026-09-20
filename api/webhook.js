@@ -68,12 +68,9 @@ module.exports = async (req, res) => {
     const claimed = await claimEvent(eventKey(body, rawBody));
     if (!claimed) return res.status(200).json({ received: true, duplicate: true });
   } catch (err) {
-    // Redis failure must not make the inbound webhook silently disappear.
     console.error('[webhook] dedupe unavailable:', err.message);
   }
 
-  // Keep the response fast for Zernio, but do not intentionally detach processing.
-  // Vercel will keep the function alive while this promise is awaited.
   try {
     await handleEvent(body);
     return res.status(200).json({ received: true, processed: true });
@@ -115,7 +112,7 @@ async function handleComment(event) {
   const result = await generateReply({ platform, type: 'comment', message: commentText, contextText: postCaption });
   let sendError = '';
 
-  if (!result.escalate && postId && accountId) {
+  if (postId && accountId && result.reply) {
     try {
       await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: result.reply });
     } catch (err) {
@@ -129,7 +126,7 @@ async function handleComment(event) {
     contact: authorHandle,
     type: 'comment',
     message: commentText,
-    reply: result.escalate ? '(held for human review)' : sendError ? '(send failed, see notes)' : result.reply,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus,
     productInterest: result.productInterest,
     escalated: result.escalate || Boolean(sendError),
@@ -153,7 +150,7 @@ async function handleMessage(event) {
   const result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText });
   let sendError = '';
 
-  if (!result.escalate && accountId) {
+  if (accountId && result.reply) {
     try {
       await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply });
     } catch (err) {
@@ -167,7 +164,7 @@ async function handleMessage(event) {
     contact: senderHandle,
     type: platform === 'whatsapp' ? 'whatsapp' : 'dm',
     message: messageText,
-    reply: result.escalate ? '(held for human review)' : sendError ? '(send failed, see notes)' : result.reply,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus,
     productInterest: result.productInterest,
     escalated: result.escalate || Boolean(sendError),
