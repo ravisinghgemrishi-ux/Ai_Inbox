@@ -1,0 +1,46 @@
+### Sample: Instagram comment
+POST http://localhost:3000/api/webhook
+Content-Type: application/json
+
+{
+  "id": "test-event-1",
+  "event": "comment.received",
+  "comment": {
+    "id": "comment-123",
+    "text": "Ye 13 mukhi rudraksha ki price kya hai?",
+    "author": { "username": "test_user_123" }
+  },
+  "post": {
+    "id": "post-456",
+    "caption": "New 13 Mukhi Rudraksha collection is here!",
+    "platform": "instagram"
+  },
+  "account": {
+    "accountId": "gemrishi-ig",
+    "platform": "instagram"
+  },
+  "timestamp": "2026-09-20T10:00:00Z"
+}
+
+### Sample: WhatsApp message
+POST http://localhost:3000/api/webhook
+Content-Type: application/json
+
+{
+  "id": "test-event-2",
+  "event": "message.received",
+  "message": {
+    "text": "Hi, I want to buy a 5 mukhi mala for daily wear. What do you recommend?",
+    "senderId": "919999999999",
+    "senderName": "Test Customer"
+  },
+  "conversation": {
+    "id": "conversation-789",
+    "platform": "whatsapp"
+  },
+  "account": {
+    "accountId": "gemrishi-wa",
+    "platform": "whatsapp"
+  },
+  "timestamp": "2026-09-20T10:01:00Z"
+}
