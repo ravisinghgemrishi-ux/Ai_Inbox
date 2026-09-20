@@ -107,6 +107,15 @@ async function handleComment(event) {
   const commentText = comment.text || comment.content || comment.message || '';
   const authorHandle = comment.author?.username || comment.author?.name || 'unknown';
   const postCaption = post.caption || post.content || '';
+
+  // Zernio can deliver the connected account's own Instagram/Facebook replies
+  // as comment.received webhooks. Never feed our own reply back into Gemini,
+  // otherwise the bot replies to itself and creates a multi-reply loop.
+  if (comment.author?.isOwnAccount === true) {
+    console.log('[webhook] ignored own-account comment:', commentId || 'unknown');
+    return;
+  }
+
   if (!commentText) return;
 
   const result = await generateReply({ platform, type: 'comment', message: commentText, contextText: postCaption });
