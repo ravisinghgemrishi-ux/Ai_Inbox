@@ -9,24 +9,28 @@ const { logLead } = require('../lib/leadLog');
 
 module.exports.config = { api: { bodyParser: false } };
 
-function eventKey(event, rawBody) {
-  return String(
-    event?.id ||
-    event?.eventId ||
-    event?.webhookEventId ||
-    event?.comment?.id ||
-    event?.message?.id ||
-    crypto.createHash('sha256').update(rawBody).digest('hex'),
-  );
+function stableInboundKey(event, rawBody) {
+  // The platform object ID is the identity of the customer action. Prefer it
+  // over a webhook delivery/event ID because the same comment can be delivered
+  // more than once with different delivery IDs.
+  if (event?.comment?.id) return `comment:${event.comment.id}`;
+  if (event?.comment?.commentId) return `comment:${event.comment.commentId}`;
+  if (event?.message?.id) return `message:${event.message.id}`;
+  if (event?.message?.messageId) return `message:${event.message.messageId}`;
+  if (event?.id) return `event:${event.id}`;
+  if (event?.eventId) return `event:${event.eventId}`;
+  if (event?.webhookEventId) return `event:${event.webhookEventId}`;
+  return `body:${crypto.createHash('sha256').update(rawBody).digest('hex')}`;
 }
 
-async function claimEvent(key) {
-  // Redis is optional; without it the handler still works, but duplicate protection is unavailable.
+async function claimEvent(key, ttlSeconds = 86400) {
+  // Redis is the hard duplicate gate. SET ... NX is atomic, so two concurrent
+  // webhook deliveries for the same customer action cannot both process.
   const redisUrl = process.env.REDIS_KV_REST_API_URL || process.env.REDIS_URL;
   const redisToken = process.env.REDIS_KV_REST_API_TOKEN || process.env.REDIS_K_TOKEN;
   if (!redisUrl || !redisToken) return true;
 
-  const url = redisUrl.replace(/\/$/, '') + `/set/${encodeURIComponent(`gemrishi:webhook:${key}`)}/1/EX/86400/NX`;
+  const url = redisUrl.replace(/\/$/, '') + `/set/${encodeURIComponent(`gemrishi:webhook:${key}`)}/1/EX/${ttlSeconds}/NX`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${redisToken}` },
@@ -49,7 +53,6 @@ module.exports = async (req, res) => {
   const signature = req.headers['x-late-signature'] || req.headers['x-zernio-signature'];
   const secret = process.env.ZERNIO_WEBHOOK_SECRET;
 
-  // Production webhooks must be signed. Never accept an unsigned event when a secret is configured.
   if (secret && !verifyWebhookSignature({ rawBody, signatureHeader: signature, secret })) {
     return res.status(401).json({ error: 'Invalid signature' });
   }
@@ -64,11 +67,18 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: 'Invalid JSON' });
   }
 
+  const key = stableInboundKey(body, rawBody);
   try {
-    const claimed = await claimEvent(eventKey(body, rawBody));
-    if (!claimed) return res.status(200).json({ received: true, duplicate: true });
+    const claimed = await claimEvent(key);
+    if (!claimed) {
+      console.log('[webhook] ignored duplicate inbound action:', key);
+      return res.status(200).json({ received: true, duplicate: true });
+    }
   } catch (err) {
-    console.error('[webhook] dedupe unavailable:', err.message);
+    // Do not knowingly create duplicate replies when Redis is unavailable.
+    // A fail-closed webhook is safer than sending two customer-facing replies.
+    console.error('[webhook] dedupe unavailable; refusing to auto-reply:', err.message);
+    return res.status(503).json({ received: true, processed: false, error: 'Duplicate protection unavailable' });
   }
 
   try {
@@ -108,9 +118,8 @@ async function handleComment(event) {
   const authorHandle = comment.author?.username || comment.author?.name || 'unknown';
   const postCaption = post.caption || post.content || '';
 
-  // Zernio can deliver the connected account's own Instagram/Facebook replies
-  // as comment.received webhooks. Never feed our own reply back into Gemini,
-  // otherwise the bot replies to itself and creates a multi-reply loop.
+  // Zernio documents this flag for Instagram/Facebook because Meta can
+  // re-deliver the connected account's own replies as comment.received.
   if (comment.author?.isOwnAccount === true) {
     console.log('[webhook] ignored own-account comment:', commentId || 'unknown');
     return;
@@ -118,12 +127,23 @@ async function handleComment(event) {
 
   if (!commentText) return;
 
-  const result = await generateReply({ platform, type: 'comment', message: commentText, contextText: postCaption });
+  const result = await generateReply({
+    platform,
+    type: 'comment',
+    message: commentText,
+    contextText: postCaption,
+  });
   let sendError = '';
 
   if (postId && accountId && result.reply) {
     try {
-      await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: result.reply });
+      await replyToComment({
+        apiKey: process.env.ZERNIO_API_KEY,
+        postId,
+        accountId,
+        commentId,
+        text: result.reply,
+      });
     } catch (err) {
       console.error('[webhook] replyToComment failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
@@ -156,12 +176,21 @@ async function handleMessage(event) {
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
 
-  const result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText });
+  const result = await generateReply({
+    platform,
+    type: platform === 'whatsapp' ? 'whatsapp' : 'dm',
+    message: messageText,
+  });
   let sendError = '';
 
   if (accountId && result.reply) {
     try {
-      await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply });
+      await sendConversationMessage({
+        apiKey: process.env.ZERNIO_API_KEY,
+        conversationId,
+        accountId,
+        text: result.reply,
+      });
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
