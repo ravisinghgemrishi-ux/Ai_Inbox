@@ -6,13 +6,13 @@ const {
 } = require('../lib/zernioClient');
 const { generateReply } = require('../lib/replyEngine');
 const { logLead } = require('../lib/leadLog');
+const { classifyIntent, extractProduct } = require('../lib/intentRouter');
+const { getMemory, addTurn, formatMemory } = require('../lib/memoryStore');
+const { lookupLiveProduct, formatLiveProductData } = require('../lib/productResolver');
 
 module.exports.config = { api: { bodyParser: false } };
 
 function stableInboundKey(event, rawBody) {
-  // The platform object ID is the identity of the customer action. Prefer it
-  // over a webhook delivery/event ID because the same comment can be delivered
-  // more than once with different delivery IDs.
   if (event?.comment?.id) return `comment:${event.comment.id}`;
   if (event?.comment?.commentId) return `comment:${event.comment.commentId}`;
   if (event?.message?.id) return `message:${event.message.id}`;
@@ -24,48 +24,63 @@ function stableInboundKey(event, rawBody) {
 }
 
 async function claimEvent(key, ttlSeconds = 86400) {
-  // Redis is the hard duplicate gate. SET ... NX is atomic, so two concurrent
-  // webhook deliveries for the same customer action cannot both process.
   const redisUrl = process.env.REDIS_KV_REST_API_URL || process.env.REDIS_URL;
   const redisToken = process.env.REDIS_KV_REST_API_TOKEN || process.env.REDIS_K_TOKEN;
   if (!redisUrl || !redisToken) return true;
-
   const url = redisUrl.replace(/\/$/, '') + `/set/${encodeURIComponent(`gemrishi:webhook:${key}`)}/1/EX/${ttlSeconds}/NX`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${redisToken}` },
-  });
+  const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${redisToken}` } });
   if (!res.ok) throw new Error(`Redis dedupe error ${res.status}`);
   const data = await res.json();
   return data?.result === 'OK';
+}
+
+async function loadContext(scope, id) {
+  try {
+    const turns = await getMemory(scope, id);
+    return formatMemory(turns);
+  } catch (err) {
+    console.error('[webhook] memory read failed:', err.message);
+    return '';
+  }
+}
+
+async function saveTurn(scope, id, role, text) {
+  try {
+    await addTurn(scope, id, { role, text });
+  } catch (err) {
+    console.error('[webhook] memory write failed:', err.message);
+  }
+}
+
+async function buildAIContext(messageText, type, platform, existingMemory, postCaption = '') {
+  const intent = classifyIntent(messageText);
+  const product = extractProduct(messageText);
+  const live = await lookupLiveProduct(product || messageText);
+  const liveData = formatLiveProductData(live);
+  const parts = [
+    `INTENT: ${intent.intent} (confidence ${intent.confidence})`,
+    product ? `PRODUCT: ${product}` : 'PRODUCT: not explicitly identified',
+    existingMemory ? `RECENT CONVERSATION:\n${existingMemory}` : 'RECENT CONVERSATION: none',
+  ];
+  if (postCaption) parts.push(`POST CONTEXT: ${postCaption}`);
+  return { contextText: parts.join('\n\n'), liveProductData: liveData, intent, product, live };
 }
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   let rawBody;
-  try {
-    rawBody = await readRawBody(req);
-  } catch {
-    return res.status(400).json({ error: 'Unable to read request body' });
-  }
+  try { rawBody = await readRawBody(req); }
+  catch { return res.status(400).json({ error: 'Unable to read request body' }); }
 
   const signature = req.headers['x-late-signature'] || req.headers['x-zernio-signature'];
   const secret = process.env.ZERNIO_WEBHOOK_SECRET;
-
-  if (secret && !verifyWebhookSignature({ rawBody, signatureHeader: signature, secret })) {
-    return res.status(401).json({ error: 'Invalid signature' });
-  }
-  if (!secret && process.env.NODE_ENV === 'production') {
-    return res.status(503).json({ error: 'Webhook secret is not configured' });
-  }
+  if (secret && !verifyWebhookSignature({ rawBody, signatureHeader: signature, secret })) return res.status(401).json({ error: 'Invalid signature' });
+  if (!secret && process.env.NODE_ENV === 'production') return res.status(503).json({ error: 'Webhook secret is not configured' });
 
   let body;
-  try {
-    body = JSON.parse(rawBody);
-  } catch {
-    return res.status(400).json({ error: 'Invalid JSON' });
-  }
+  try { body = JSON.parse(rawBody); }
+  catch { return res.status(400).json({ error: 'Invalid JSON' }); }
 
   const key = stableInboundKey(body, rawBody);
   try {
@@ -75,8 +90,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ received: true, duplicate: true });
     }
   } catch (err) {
-    // Do not knowingly create duplicate replies when Redis is unavailable.
-    // A fail-closed webhook is safer than sending two customer-facing replies.
     console.error('[webhook] dedupe unavailable; refusing to auto-reply:', err.message);
     return res.status(503).json({ received: true, processed: false, error: 'Duplicate protection unavailable' });
   }
@@ -118,36 +131,38 @@ async function handleComment(event) {
   const authorHandle = comment.author?.username || comment.author?.name || 'unknown';
   const postCaption = post.caption || post.content || '';
 
-  // Zernio documents this flag for Instagram/Facebook because Meta can
-  // re-deliver the connected account's own replies as comment.received.
   if (comment.author?.isOwnAccount === true) {
     console.log('[webhook] ignored own-account comment:', commentId || 'unknown');
     return;
   }
-
   if (!commentText) return;
+
+  const memoryScope = 'comment';
+  const memoryId = `${platform || 'social'}:${authorHandle}:${postId || 'unknown'}`;
+  const existingMemory = await loadContext(memoryScope, memoryId);
+  const aiContext = await buildAIContext(commentText, 'comment', platform, existingMemory, postCaption);
 
   const result = await generateReply({
     platform,
     type: 'comment',
     message: commentText,
-    contextText: postCaption,
+    contextText: aiContext.contextText,
+    liveProductData: aiContext.liveProductData,
   });
   let sendError = '';
 
   if (postId && accountId && result.reply) {
     try {
-      await replyToComment({
-        apiKey: process.env.ZERNIO_API_KEY,
-        postId,
-        accountId,
-        commentId,
-        text: result.reply,
-      });
+      await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: result.reply });
     } catch (err) {
       console.error('[webhook] replyToComment failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
     }
+  }
+
+  if (!sendError) {
+    await saveTurn(memoryScope, memoryId, 'customer', commentText);
+    await saveTurn(memoryScope, memoryId, 'assistant', result.reply);
   }
 
   await logLead({
@@ -157,9 +172,9 @@ async function handleComment(event) {
     message: commentText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus,
-    productInterest: result.productInterest,
+    productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: result.escalateReason || sendError,
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
   });
 }
 
@@ -176,25 +191,31 @@ async function handleMessage(event) {
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
 
+  const memoryScope = 'conversation';
+  const existingMemory = await loadContext(memoryScope, `${platform || 'social'}:${conversationId}`);
+  const aiContext = await buildAIContext(messageText, platform === 'whatsapp' ? 'whatsapp' : 'dm', platform, existingMemory);
+
   const result = await generateReply({
     platform,
     type: platform === 'whatsapp' ? 'whatsapp' : 'dm',
     message: messageText,
+    contextText: aiContext.contextText,
+    liveProductData: aiContext.liveProductData,
   });
   let sendError = '';
 
   if (accountId && result.reply) {
     try {
-      await sendConversationMessage({
-        apiKey: process.env.ZERNIO_API_KEY,
-        conversationId,
-        accountId,
-        text: result.reply,
-      });
+      await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply });
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
     }
+  }
+
+  if (!sendError) {
+    await saveTurn(memoryScope, `${platform || 'social'}:${conversationId}`, 'customer', messageText);
+    await saveTurn(memoryScope, `${platform || 'social'}:${conversationId}`, 'assistant', result.reply);
   }
 
   await logLead({
@@ -204,8 +225,8 @@ async function handleMessage(event) {
     message: messageText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus,
-    productInterest: result.productInterest,
+    productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: result.escalateReason || sendError,
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
   });
 }
