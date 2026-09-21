@@ -10,6 +10,8 @@ const { logLead } = require('../lib/leadLog');
 const { classifyIntent, extractProduct } = require('../lib/intentRouter');
 const { getMemory, addTurn, formatMemory } = require('../lib/memoryStore');
 const { lookupLiveProduct, formatLiveProductData } = require('../lib/productResolver');
+const { mergeEscalation } = require('../lib/escalationPolicy');
+const { notifyEscalation } = require('../lib/escalationNotifier');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -84,6 +86,15 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
 }
 
+async function sendEscalationAlert(result, details) {
+  if (!result?.escalate) return;
+  try {
+    await notifyEscalation({ ...details, reason: result.escalateReason, leadStatus: result.leadStatus, productInterest: result.productInterest });
+  } catch (err) {
+    console.error('[escalation] alert failed; lead remains logged:', err.message);
+  }
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   let rawBody;
@@ -105,8 +116,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ received: true, duplicate: true });
     }
   } catch (err) {
-    // Redis is an optimization/safety layer, not a dependency for customer replies.
-    // Zernio request idempotency is the cross-instance final safety net.
     console.error('[webhook] duplicate protection unavailable; continuing with reply:', err.message);
   }
 
@@ -161,14 +170,14 @@ async function handleComment(event) {
       return;
     }
   } catch (err) {
-    // Never let Redis outage prevent a customer reply.
     console.error('[webhook] reply gate unavailable; continuing with comment reply:', err.message);
   }
 
   const memoryId = `${platform || 'social'}:${authorHandle}:${postId || 'unknown'}`;
   const existingMemory = await loadContext('comment', memoryId);
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
-  const result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  result = mergeEscalation(result, commentText, false);
   let sendError = '';
 
   if (postId && accountId && result.reply) {
@@ -179,6 +188,7 @@ async function handleComment(event) {
     } catch (err) {
       console.error('[webhook] replyToComment failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
+      result = mergeEscalation(result, commentText, true);
       await releaseReplySlot(replyKey);
     }
   } else {
@@ -196,6 +206,11 @@ async function handleComment(event) {
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+  });
+
+  await sendEscalationAlert(result, {
+    platform, contact: authorHandle, type: 'comment', message: commentText,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
   });
 }
 
@@ -222,14 +237,14 @@ async function handleMessage(event) {
       return;
     }
   } catch (err) {
-    // Never let Redis outage prevent a customer DM reply.
     console.error('[webhook] message reply gate unavailable; continuing with DM reply:', err.message);
   }
 
   const memoryId = `${platform || 'social'}:${conversationId}`;
   const existingMemory = await loadContext('conversation', memoryId);
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
-  const result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  let result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  result = mergeEscalation(result, messageText, false);
   let sendError = '';
 
   if (accountId && result.reply) {
@@ -243,6 +258,7 @@ async function handleMessage(event) {
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
+      result = mergeEscalation(result, messageText, true);
       await releaseReplySlot(replyKey);
     }
   } else {
@@ -260,6 +276,11 @@ async function handleMessage(event) {
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+  });
+
+  await sendEscalationAlert(result, {
+    platform, contact: senderHandle, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
   });
 }
 
