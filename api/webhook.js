@@ -104,8 +104,9 @@ module.exports = async (req, res) => {
       return res.status(200).json({ received: true, duplicate: true });
     }
   } catch (err) {
-    console.error('[webhook] duplicate protection unavailable; refusing to auto-reply:', err.message);
-    return res.status(503).json({ received: true, processed: false, error: 'Duplicate protection unavailable' });
+    // Redis is an optimization/safety layer, not a dependency for customer replies.
+    // If Redis is down or misconfigured, continue processing so comments and DMs are never silently dropped.
+    console.error('[webhook] duplicate protection unavailable; continuing with reply:', err.message);
   }
 
   try {
@@ -150,16 +151,17 @@ async function handleComment(event) {
   }
   if (!commentText) return;
 
-  let slot;
+  const replyKey = `comment:${commentId || inboundSafeId(event)}`;
+  let slot = { allowed: true, reason: 'redis_unavailable' };
   try {
-    slot = await claimReplySlot(`comment:${commentId || inboundSafeId(event)}`);
+    slot = await claimReplySlot(replyKey);
     if (!slot.allowed) {
       console.log('[webhook] reply suppressed:', slot.reason, commentId || 'unknown');
       return;
     }
   } catch (err) {
-    console.error('[webhook] reply gate unavailable:', err.message);
-    return;
+    // Never let Redis outage prevent a customer reply.
+    console.error('[webhook] reply gate unavailable; continuing with comment reply:', err.message);
   }
 
   const memoryId = `${platform || 'social'}:${authorHandle}:${postId || 'unknown'}`;
@@ -171,14 +173,15 @@ async function handleComment(event) {
   if (postId && accountId && result.reply) {
     try {
       await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: result.reply });
-      await markReplySent(`comment:${commentId || inboundSafeId(event)}`);
+      try { await markReplySent(replyKey); }
+      catch (err) { console.error('[webhook] reply sent but Redis status update failed:', err.message); }
     } catch (err) {
       console.error('[webhook] replyToComment failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
-      await releaseReplySlot(`comment:${commentId || inboundSafeId(event)}`);
+      await releaseReplySlot(replyKey);
     }
   } else {
-    await releaseReplySlot(`comment:${commentId || inboundSafeId(event)}`);
+    await releaseReplySlot(replyKey);
   }
 
   if (!sendError) {
@@ -208,16 +211,17 @@ async function handleMessage(event) {
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
 
-  let slot;
+  const replyKey = `message:${message.id || message.messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`;
+  let slot = { allowed: true, reason: 'redis_unavailable' };
   try {
-    slot = await claimReplySlot(`message:${message.id || message.messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`);
+    slot = await claimReplySlot(replyKey);
     if (!slot.allowed) {
       console.log('[webhook] message reply suppressed:', slot.reason);
       return;
     }
   } catch (err) {
-    console.error('[webhook] message reply gate unavailable:', err.message);
-    return;
+    // Never let Redis outage prevent a customer DM reply.
+    console.error('[webhook] message reply gate unavailable; continuing with DM reply:', err.message);
   }
 
   const memoryId = `${platform || 'social'}:${conversationId}`;
@@ -225,12 +229,12 @@ async function handleMessage(event) {
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
   const result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   let sendError = '';
-  const replyKey = `message:${message.id || message.messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`;
 
   if (accountId && result.reply) {
     try {
       await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply });
-      await markReplySent(replyKey);
+      try { await markReplySent(replyKey); }
+      catch (err) { console.error('[webhook] DM sent but Redis status update failed:', err.message); }
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
