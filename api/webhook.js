@@ -3,6 +3,7 @@ const {
   verifyWebhookSignature,
   replyToComment,
   sendConversationMessage,
+  messageReplyIdempotencyKey,
 } = require('../lib/zernioClient');
 const { generateReply } = require('../lib/replyEngine');
 const { logLead } = require('../lib/leadLog');
@@ -105,7 +106,7 @@ module.exports = async (req, res) => {
     }
   } catch (err) {
     // Redis is an optimization/safety layer, not a dependency for customer replies.
-    // If Redis is down or misconfigured, continue processing so comments and DMs are never silently dropped.
+    // Zernio request idempotency is the cross-instance final safety net.
     console.error('[webhook] duplicate protection unavailable; continuing with reply:', err.message);
   }
 
@@ -207,11 +208,12 @@ async function handleMessage(event) {
   const platform = account.platform || conversation.platform;
   const accountId = account.accountId || account.id;
   const conversationId = conversation.id || conversation.conversationId;
+  const messageId = message.id || message.messageId;
   const messageText = message.text || message.message || '';
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
 
-  const replyKey = `message:${message.id || message.messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`;
+  const replyKey = `message:${messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`;
   let slot = { allowed: true, reason: 'redis_unavailable' };
   try {
     slot = await claimReplySlot(replyKey);
@@ -232,7 +234,10 @@ async function handleMessage(event) {
 
   if (accountId && result.reply) {
     try {
-      await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply });
+      const idempotencyKey = messageId
+        ? messageReplyIdempotencyKey({ conversationId, accountId, messageId })
+        : undefined;
+      await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply, idempotencyKey });
       try { await markReplySent(replyKey); }
       catch (err) { console.error('[webhook] DM sent but Redis status update failed:', err.message); }
     } catch (err) {
