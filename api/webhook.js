@@ -12,6 +12,7 @@ const { getMemory, addTurn, formatMemory } = require('../lib/memoryStore');
 const { lookupLiveProduct, formatLiveProductData } = require('../lib/productResolver');
 const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation } = require('../lib/escalationNotifier');
+const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -243,7 +244,22 @@ async function handleMessage(event) {
   const memoryId = `${platform || 'social'}:${conversationId}`;
   const existingMemory = await loadContext('conversation', memoryId);
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
-  let result = await generateReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  const messageType = platform === 'whatsapp' ? 'whatsapp' : 'dm';
+
+  // Mannat 2.0: an isolated, additive branch (see lib/kundliFlow.js) that
+  // only ever engages when ENABLE_KUNDLI_FLOW=true. It returns null when
+  // not applicable, and the normal replyEngine path below runs unchanged -
+  // this line is the ENTIRE footprint of that feature on the live flow.
+  let result = await maybeHandleKundliTurn({
+    enabled: process.env.ENABLE_KUNDLI_FLOW === 'true',
+    type: messageType,
+    memoryId,
+    message: messageText,
+    intent: aiContext.intent,
+  });
+  if (!result) {
+    result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  }
   result = mergeEscalation(result, messageText, false);
   let sendError = '';
 
@@ -271,7 +287,7 @@ async function handleMessage(event) {
   }
 
   await logLead({
-    platform, contact: senderHandle, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText,
+    platform, contact: senderHandle, type: messageType, message: messageText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
@@ -279,7 +295,7 @@ async function handleMessage(event) {
   });
 
   await sendEscalationAlert(result, {
-    platform, contact: senderHandle, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText,
+    platform, contact: senderHandle, type: messageType, message: messageText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
   });
 }
