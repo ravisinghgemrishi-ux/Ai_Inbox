@@ -13,6 +13,7 @@ const { lookupLiveProduct, formatLiveProductData } = require('../lib/productReso
 const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
+const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -241,10 +242,28 @@ async function handleMessage(event) {
     console.error('[webhook] message reply gate unavailable; continuing with DM reply:', err.message);
   }
 
+  const messageType = platform === 'whatsapp' ? 'whatsapp' : 'dm';
+
+  // Ravi, confirmed 2026-09-23: stop auto-replying to Facebook DMs entirely
+  // (Instagram DMs/comments and Facebook comments are unaffected; WhatsApp
+  // stays off until it's connected separately). This also sidesteps the
+  // Facebook 24-hour messaging-window failures seen earlier, since we no
+  // longer attempt to send into that window at all. The lead is still
+  // logged (not silently dropped) so nothing goes unseen - it's just not
+  // auto-replied.
+  if (platform === 'facebook' && messageType === 'dm') {
+    await logLead({
+      platform, contact: senderHandle, type: messageType, message: messageText,
+      reply: '(not sent - Facebook DM auto-reply is currently disabled)',
+      leadStatus: 'WARM', productInterest: '', escalated: false,
+      notes: 'facebook_dm_auto_reply_disabled',
+    });
+    return;
+  }
+
   const memoryId = `${platform || 'social'}:${conversationId}`;
   const existingMemory = await loadContext('conversation', memoryId);
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
-  const messageType = platform === 'whatsapp' ? 'whatsapp' : 'dm';
 
   // Mannat 2.0: an isolated, additive branch (see lib/kundliFlow.js) that
   // only ever engages when ENABLE_KUNDLI_FLOW=true. It returns null when
@@ -257,6 +276,19 @@ async function handleMessage(event) {
     message: messageText,
     intent: aiContext.intent,
   });
+  // Consultation-plan payment flow (see lib/consultationFlow.js) - live by
+  // default, independent of the Kundli flow above. Only engages when the
+  // customer names a specific paid plan; otherwise it returns null and the
+  // normal replyEngine path below runs unchanged.
+  if (!result) {
+    result = await maybeHandleConsultationPayment({
+      enabled: process.env.ENABLE_CONSULTATION_PAYMENT_FLOW !== 'false',
+      type: messageType,
+      memoryId,
+      message: messageText,
+      intent: aiContext.intent,
+    });
+  }
   if (!result) {
     result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   }
