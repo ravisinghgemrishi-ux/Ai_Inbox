@@ -39,12 +39,13 @@ function fakeGeminiResponse(requestBody) {
 
   if (sys.includes('You extract birth-chart intake details')) {
     // Slot-extraction call - parse the userText ourselves (test-only stand-in for Gemini).
-    const out = { name: '', date: '', time: '', place: '', purpose: '' };
+    const out = { name: '', date: '', time: '', place: '', purpose: '', phone: '' };
     if (/^Test Customer$/i.test(userText.trim())) out.name = 'Test Customer';
     if (/1995|15-08-1995/.test(userText)) out.date = '1995-08-15';
     if (/10:30/.test(userText)) out.time = '10:30';
     if (/Ambala/i.test(userText)) out.place = 'Ambala';
     if (/wealth/i.test(userText)) out.purpose = 'wealth';
+    if (/^9876543210$/.test(userText.trim())) out.phone = '9876543210';
     return out;
   }
   if (sys.includes('WHAT TO DO THIS TURN')) {
@@ -106,7 +107,7 @@ async function run() {
   console.log('OK: flow entry ->', result.reply);
 
   // 5. Feed slots one at a time (each a separate inbound message/turn).
-  const turns = ['Test Customer', '15-08-1995', '10:30', 'Ambala', 'wealth'];
+  const turns = ['Test Customer', '15-08-1995', '10:30', 'Ambala', 'wealth', '9876543210'];
   for (const turn of turns) {
     result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: turn, intent: { intent: 'consultation' } });
     assert.ok(result, `turn "${turn}" should produce a result`);
@@ -122,12 +123,16 @@ async function run() {
   assert.strictEqual(result.escalate, false);
   console.log('OK: category chosen, recommendation ->', result.productInterest);
 
-  // 7. Confirm ready to buy - should escalate with a payment link in escalateReason.
+  // 7. Confirm ready to buy - Rudraksha has a known Shopify product page, so
+  // the AI shares a plain PRODUCT PAGE link (never a pre-loaded cart link)
+  // and does NOT escalate - the customer can buy it themselves.
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: 'yes I want to buy this', intent: { intent: 'consultation' } });
-  assert.strictEqual(result.escalate, true, 'ready-to-buy must escalate to a human');
-  assert.ok(result.escalateReason.includes('kundli_ready_to_buy'), 'escalate reason should be tagged');
-  assert.ok(result.escalateReason.includes('/cart/53971290292538:1'), 'case file should include the real Shopify cart link');
-  console.log('OK: ready-to-buy escalation ->', result.escalateReason);
+  assert.strictEqual(result.escalate, false, 'rudraksha with a known product page should NOT escalate - self-serve');
+  assert.ok(result.escalateReason.includes('kundli_ready_to_buy'), 'case notes should still be tagged for the lead sheet');
+  assert.ok(!result.escalateReason.includes('/cart/'), 'must NEVER be a pre-loaded cart link');
+  assert.ok(result.escalateReason.includes('/products/7-mukhi-rudraksha-premium-nepal'), 'should include the real product PAGE link');
+  assert.ok(result.escalateReason.includes('Phone: 9876543210'), 'case notes should include the phone number collected earlier');
+  console.log('OK: ready-to-buy -> self-serve product link, no escalation ->', result.escalateReason);
 
   // 8. Session should be cleared after completion - a fresh non-consultation message returns null again.
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: 'thanks', intent: { intent: 'general' } });
@@ -157,7 +162,8 @@ async function run() {
   console.log('OK: gemstone branch recommendation ->', result.productInterest);
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId3, message: 'yes lets buy', intent: { intent: 'consultation' } });
   assert.strictEqual(result.escalate, true);
-  assert.ok(result.escalateReason.includes('Payment link: not available yet'), 'gemstones have no live payment link yet - must say so, never fabricate one');
+  assert.ok(!/https?:\/\//.test(result.escalateReason), 'gemstones must never include any payment/cart link');
+  assert.ok(result.escalateReason.includes('handed off to team'), 'gemstone buy-confirm should hand payment to a human, same as every other category');
   console.log('OK: gemstone buy-confirm escalates without a fabricated link ->', result.escalateReason);
 
   // 11. Astrology engine failure - must still respond and escalate with
@@ -172,6 +178,24 @@ async function run() {
   assert.ok(result.reply && result.reply.length > 0, 'must still send the customer a reply on failure');
   forceFinderFailure = false;
   console.log('OK: astrology engine failure escalates gracefully with a reply ->', result.escalateReason);
+
+  // 12. "Not sure" branch: when the customer doesn't know gemstone vs
+  // Rudraksha, ask for budget, then give guidance (never forcing a choice
+  // via a hardcoded price rule) and still require them to confirm one.
+  const memoryId5 = 'test:conversation:5';
+  for (const turn of ['astrology guidance please', ...turns]) {
+    result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: turn, intent: { intent: 'consultation' } });
+  }
+  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: "I'm not sure, you decide", intent: { intent: 'consultation' } });
+  assert.strictEqual(result.escalate, false);
+  console.log('OK: unsure -> asked for budget ->', result.reply);
+  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: '2000 rupees', intent: { intent: 'consultation' } });
+  assert.strictEqual(result.escalate, false);
+  console.log('OK: budget given -> guidance reply ->', result.reply);
+  // Must still land back in the normal category choice - confirming Rudraksha now works.
+  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: 'Rudraksha please', intent: { intent: 'consultation' } });
+  assert.ok(result.productInterest, 'should still recommend a product after the budget detour');
+  console.log('OK: budget detour -> confirmed Rudraksha ->', result.productInterest);
 
   console.log(`\nAll assertions passed. (${geminiCallCount} mocked Gemini calls)`);
 }
