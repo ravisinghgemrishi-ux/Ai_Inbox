@@ -14,6 +14,7 @@ const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
+const { detectReplyLanguageNote } = require('../lib/knowledgeBase');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -152,6 +153,12 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
   if (existingMemory && WHATSAPP_NUMBER_PATTERN.test(existingMemory)) {
     parts.push('NOTE: You already shared the WhatsApp consultation number earlier in this conversation - do not paste it again in this reply unless the customer explicitly asks for it a second time.');
   }
+  // Fix (2026-09-23, Ravi): found conversations where Mannat drifted from
+  // Hinglish into plain English mid-conversation - see knowledgeBase.js's
+  // detectReplyLanguageNote for why a deterministic per-turn note is used
+  // instead of relying only on the general "match their language" prose.
+  const languageNote = detectReplyLanguageNote(messageText, existingMemory);
+  if (languageNote) parts.push(languageNote);
   if (postCaption) parts.push(`POST CONTEXT: ${postCaption}`);
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
 }
@@ -390,6 +397,7 @@ async function handleMessage(event) {
     memoryId,
     message: messageText,
     intent: aiContext.intent,
+    existingMemory,
   });
   // Consultation-plan payment flow (see lib/consultationFlow.js) - live by
   // default, independent of the Kundli flow above. Only engages when the
@@ -402,6 +410,7 @@ async function handleMessage(event) {
       memoryId,
       message: messageText,
       intent: aiContext.intent,
+      existingMemory,
     });
   }
   if (!result) {
