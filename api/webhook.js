@@ -251,7 +251,7 @@ async function handleMessage(event) {
   // longer attempt to send into that window at all. The lead is still
   // logged (not silently dropped) so nothing goes unseen - it's just not
   // auto-replied.
-  if (platform === 'facebook' && messageType === 'dm') {
+  if (isFacebookDmPlatform(platform) && messageType === 'dm') {
     await logLead({
       platform, contact: senderHandle, type: messageType, message: messageText,
       reply: '(not sent - Facebook DM auto-reply is currently disabled)',
@@ -334,4 +334,16 @@ async function handleMessage(event) {
 
 function inboundSafeId(event) {
   return crypto.createHash('sha256').update(JSON.stringify(event)).digest('hex').slice(0, 24);
+}
+
+// Ravi reported (2026-09-23) that Facebook DMs were still getting auto-replies
+// even after the disable block below was live. Root cause: that check only
+// matched the exact string "facebook", but Zernio (like most social APIs)
+// can label a Facebook Page's DM inbox as "messenger" or similar instead of
+// "facebook" - so the strict match silently missed those events and they
+// fell through to the normal auto-reply path. This matches common variants
+// case-insensitively so it can't be missed by a labelling difference again.
+function isFacebookDmPlatform(platform) {
+  const normalized = String(platform || '').trim().toLowerCase();
+  return ['facebook', 'fb', 'messenger', 'facebook_messenger', 'fb_messenger', 'facebookmessenger'].includes(normalized);
 }
