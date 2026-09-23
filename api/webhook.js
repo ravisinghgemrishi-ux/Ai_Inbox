@@ -130,6 +130,16 @@ async function saveTurn(scope, id, role, text) {
   catch (err) { console.error('[webhook] memory write failed:', err.message); }
 }
 
+// Ravi found real conversations (2026-09-23) where Mannat repeated the
+// WhatsApp consultation number in almost every reply of the same
+// conversation, unprompted - a habit rather than something the customer
+// asked for again. The prompt already says not to do this, but a factual
+// flag ("you already gave this") is far more reliable for the model to act
+// on than a general "don't overuse it" instruction, so this checks the
+// recent-conversation text (which includes Mannat's own past replies, saved
+// by saveTurn) for the number and surfaces that plainly.
+const WHATSAPP_NUMBER_PATTERN = /98179\s*75978|98179\s*75972/;
+
 async function buildAIContext(messageText, platform, existingMemory, postCaption = '') {
   const intent = classifyIntent(messageText);
   const product = extractProduct(messageText);
@@ -139,6 +149,9 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
     product ? `PRODUCT: ${product}` : 'PRODUCT: not explicitly identified',
     existingMemory ? `RECENT CONVERSATION:\n${existingMemory}` : 'RECENT CONVERSATION: none',
   ];
+  if (existingMemory && WHATSAPP_NUMBER_PATTERN.test(existingMemory)) {
+    parts.push('NOTE: You already shared the WhatsApp consultation number earlier in this conversation - do not paste it again in this reply unless the customer explicitly asks for it a second time.');
+  }
   if (postCaption) parts.push(`POST CONTEXT: ${postCaption}`);
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
 }
