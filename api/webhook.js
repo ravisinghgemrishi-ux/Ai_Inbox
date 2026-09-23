@@ -32,6 +32,10 @@ async function redisCommand(path, method = 'POST') {
   return res.json().catch(() => ({}));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function stableInboundKey(event, rawBody) {
   if (event?.comment?.id) return `comment:${event.comment.id}`;
   if (event?.comment?.commentId) return `comment:${event.comment.commentId}`;
@@ -56,13 +60,64 @@ async function claimReplySlot(key, processingTtl = 90) {
   return { allowed: true, reason: 'claimed' };
 }
 
-async function markReplySent(key) {
-  await redisCommand(`/set/${encodeURIComponent(`gemrishi:reply-sent:${key}`)}/1/EX/604800`);
-  await redisCommand(`/del/${encodeURIComponent(`gemrishi:reply-processing:${key}`)}`);
+// Investigated 2026-09-23 (Ravi reported duplicate/conflicting replies to the
+// same customer message - see the sheet rows for "Ashad Khan" and the
+// "Idempotency-Key was already used with a different request" error on
+// gangwarpiyush07). Root cause for the latter: this write is what records
+// "this message has already been answered" so a redelivered webhook (which
+// is normal, expected behaviour - most platforms retry a webhook that didn't
+// respond fast enough) gets recognised as a duplicate and skipped. It used
+// to be a single fire-and-forget attempt - if THIS write itself hit a
+// transient Redis error right after a successful send, no record was left,
+// so a later redelivery of the same message sailed through unrecognised,
+// generated a fresh (differently-worded) AI reply, and got rejected by
+// Zernio for reusing an idempotency key with different content. Retrying
+// this specific write closes that gap.
+async function markReplySent(key, attempts = 3) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await redisCommand(`/set/${encodeURIComponent(`gemrishi:reply-sent:${key}`)}/1/EX/604800`);
+      await redisCommand(`/del/${encodeURIComponent(`gemrishi:reply-processing:${key}`)}`);
+      return;
+    } catch (err) {
+      console.error(`[webhook] markReplySent attempt ${attempt + 1}/${attempts} failed:`, err.message);
+      if (attempt < attempts - 1) await sleep(250 * (attempt + 1));
+    }
+  }
+  console.error('[webhook] markReplySent permanently failed after retries; a redelivery of this message may not be recognised as a duplicate:', key);
 }
 
 async function releaseReplySlot(key) {
   try { await redisCommand(`/del/${encodeURIComponent(`gemrishi:reply-processing:${key}`)}`); } catch (err) { console.error('[webhook] failed to release reply slot:', err.message); }
+}
+
+// Second, independent duplicate guard - catches the OTHER pattern Ravi found
+// (three back-to-back messages from "Ashad Khan", same text, each answered
+// differently). That case couldn't have been caught by the ID-based checks
+// above even if Redis were perfectly reliable, because each delivery
+// apparently carried its own distinct message id (three genuinely "new"
+// messages, from Zernio/Facebook's point of view) - most likely the
+// customer's own client re-sending after a network hiccup. This layer
+// doesn't care about message ids at all: if the exact same text arrives for
+// the exact same conversation within a short window, it's treated as one
+// customer turn, not three. Short TTL on purpose - a customer legitimately
+// repeating themselves a minute later still gets a normal reply.
+const CONTENT_DEDUP_TTL_SECONDS = 20;
+
+function normalizeForContentDedup(text) {
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 500);
+}
+
+async function claimContentSlot(scopeId, text) {
+  const hash = crypto.createHash('sha256').update(normalizeForContentDedup(text)).digest('hex').slice(0, 24);
+  const key = `gemrishi:recent-text:${scopeId}:${hash}`;
+  try {
+    const data = await redisCommand(`/set/${encodeURIComponent(key)}/1/EX/${CONTENT_DEDUP_TTL_SECONDS}/NX`);
+    return data?.result === 'OK';
+  } catch (err) {
+    console.error('[webhook] content-dedup unavailable; continuing:', err.message);
+    return true; // fail open, same philosophy as the rest of this pipeline
+  }
 }
 
 async function loadContext(scope, id) {
@@ -176,6 +231,29 @@ async function handleComment(event) {
   }
 
   const memoryId = `${platform || 'social'}:${authorHandle}:${postId || 'unknown'}`;
+
+  // Second, content-based dedup layer (independent of the message-ID gate
+  // above): catches the case where the same customer text arrives twice
+  // under genuinely different IDs (a resend), which the ID-based gate above
+  // cannot see. See claimContentSlot's comment for the diagnosed case this
+  // covers (Ashad Khan, 2026-09-23 sheet review).
+  try {
+    const contentOk = await claimContentSlot(memoryId, commentText);
+    if (!contentOk) {
+      console.log('[webhook] comment reply suppressed: duplicate text within window', commentId || 'unknown');
+      await releaseReplySlot(replyKey);
+      await logLead({
+        platform, contact: authorHandle, type: 'comment', message: commentText,
+        reply: '(not sent - duplicate of a just-answered message)',
+        leadStatus: 'WARM', productInterest: '', escalated: false,
+        notes: 'suppressed_duplicate_within_20s',
+      });
+      return;
+    }
+  } catch (err) {
+    console.error('[webhook] content-dedup check failed; continuing with comment reply:', err.message);
+  }
+
   const existingMemory = await loadContext('comment', memoryId);
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
   let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
@@ -243,6 +321,30 @@ async function handleMessage(event) {
   }
 
   const messageType = platform === 'whatsapp' ? 'whatsapp' : 'dm';
+
+  // Second, content-based dedup layer (independent of the message-ID gate
+  // above): catches the case where the same customer text arrives twice
+  // under genuinely different message IDs (a resend / redelivery with a
+  // fresh ID), which the ID-based gate above cannot see. This is what
+  // caught "Ashad Khan" getting 3 separately-worded AI replies to the same
+  // question within ~400ms (2026-09-23 sheet review) - each arrived as a
+  // distinct messageId, so the ID-based gate let all three through.
+  try {
+    const contentOk = await claimContentSlot(`${platform || 'social'}:${conversationId}`, messageText);
+    if (!contentOk) {
+      console.log('[webhook] message reply suppressed: duplicate text within window', conversationId);
+      await releaseReplySlot(replyKey);
+      await logLead({
+        platform, contact: senderHandle, type: messageType, message: messageText,
+        reply: '(not sent - duplicate of a just-answered message)',
+        leadStatus: 'WARM', productInterest: '', escalated: false,
+        notes: 'suppressed_duplicate_within_20s',
+      });
+      return;
+    }
+  } catch (err) {
+    console.error('[webhook] content-dedup check failed; continuing with DM reply:', err.message);
+  }
 
   // Ravi, confirmed 2026-09-23: stop auto-replying to Facebook DMs entirely
   // (Instagram DMs/comments and Facebook comments are unaffected; WhatsApp
