@@ -16,6 +16,7 @@ const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
+const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -179,22 +180,50 @@ function extractFallbackPhone(text) {
   return match ? match[1].replace(/[\s-]/g, '') : '';
 }
 
-// Working-hours note - added 2026-09-24 (Ravi): whenever a message escalates
-// to a human (across Instagram DMs, comments, WhatsApp - any channel), the
-// customer must always be told when the team will actually follow up, so
-// they're not left wondering. Applied deterministically here, in ONE place
-// right after mergeEscalation() decides escalate=true, so it's never skipped
-// or paraphrased away regardless of which reply source produced the message
-// (replyEngine, kundliFlow, consultationFlow, sellerInquiryFlow) - same
-// "deterministic safety net" pattern as detectReplyLanguageNote elsewhere in
-// this codebase. 10 AM - 8 PM, all 7 days (Monday-Sunday, no weekly off),
-// per Ravi's explicit instruction.
+// Handoff note - added 2026-09-24 (Ravi); extended same day after Ravi's
+// live-test review of the general-escalation path (Mannat/Neel bucket),
+// where he noticed the AI asked for an order number but never asked for the
+// customer's name/phone, and never gave the customer a way to reach GemRishi
+// directly themselves. Whenever a message escalates to a human (across
+// Instagram DMs, comments, WhatsApp - any channel), the reply now always:
+//   1) tells the customer when the team will actually follow up (working
+//      hours, unchanged from before);
+//   2) asks (once, never forces/blocks) for name + contact number, but ONLY
+//      if we don't already have both - a flow that already collected them
+//      itself (e.g. lib/sellerInquiryFlow.js's City/Name/Phone slots) is
+//      never re-asked;
+//   3) gives the customer GemRishi's own contact number, so they have a way
+//      to reach out proactively rather than only waiting.
+// Applied deterministically here, in ONE place right after mergeEscalation()
+// decides escalate=true, so it's never skipped or paraphrased away
+// regardless of which reply source produced the message (replyEngine,
+// kundliFlow, consultationFlow, sellerInquiryFlow) - same "deterministic
+// safety net" pattern as detectReplyLanguageNote elsewhere in this codebase.
+// 10 AM - 8 PM, all 7 days (Monday-Sunday, no weekly off), per Ravi.
+//
+// GEMRISHI_CONTACT_NUMBER reuses the existing Ambala HQ showroom number
+// already used elsewhere in this codebase (lib/knowledgeBase.js's
+// SHOWROOM_LOCATIONS) - TODO(Ravi): confirm this is the right number to hand
+// out as a general "reach us directly" line for an escalated customer, or
+// tell me which number you'd rather use instead.
+const GEMRISHI_CONTACT_NUMBER = '+91 98179 75978';
+
 const WORKING_HOURS_NOTE_EN = "We've noted your query and shared it with the concerned team member - they'll personally get back to you between 10 AM - 8 PM (all 7 days, Monday to Sunday).";
 const WORKING_HOURS_NOTE_HI = 'Aapki query note kar li hai aur concerned team member ko bhej di hai - wo aapse 10 AM se 8 PM ke beech (Monday se Sunday, saare 7 din) khud personally contact karenge.';
+const ASK_NAME_PHONE_NOTE_EN = "If you haven't already, please share your name and contact number so the team can reach you directly.";
+const ASK_NAME_PHONE_NOTE_HI = 'Agar aapne abhi tak apna naam aur contact number nahi diya hai, toh please share kar dijiye taaki team aapse jaldi contact kar sake.';
+const CONTACT_SHARE_NOTE_EN = `You can also reach us directly at ${GEMRISHI_CONTACT_NUMBER}.`;
+const CONTACT_SHARE_NOTE_HI = `Aap humein seedha ${GEMRISHI_CONTACT_NUMBER} par bhi contact kar sakte hain.`;
 
-function appendWorkingHoursNote(reply, message, existingMemory) {
+function appendWorkingHoursNote(reply, message, existingMemory, result) {
   if (!reply) return reply;
-  const note = (looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory)) ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN;
+  const isHindi = looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory);
+  const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
+  if (!result?.customerName || !result?.customerPhone) {
+    parts.push(isHindi ? ASK_NAME_PHONE_NOTE_HI : ASK_NAME_PHONE_NOTE_EN);
+  }
+  parts.push(isHindi ? CONTACT_SHARE_NOTE_HI : CONTACT_SHARE_NOTE_EN);
+  const note = parts.join(' ');
   if (reply.includes(note)) return reply; // never duplicate if already present
   return `${reply}\n\n${note}`;
 }
@@ -323,7 +352,7 @@ async function handleComment(event) {
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
   let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   result = mergeEscalation(result, commentText, false);
-  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory) };
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result) };
   let sendError = '';
 
   if (postId && accountId && result.reply) {
@@ -352,6 +381,7 @@ async function handleComment(event) {
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+    replySuggestion: result.replyImprovement || '',
   });
 
   await sendEscalationAlert(result, {
@@ -430,6 +460,33 @@ async function handleMessage(event) {
   }
 
   const memoryId = `${platform || 'social'}:${conversationId}`;
+
+  // Human-takeover guard (DMs only, per Ravi 2026-09-24) - see
+  // lib/humanTakeoverGuard.js for the full design and its one hard
+  // limitation (a phone-call handoff can never be detected this way).
+  // Checked BEFORE loading AI context/calling Gemini, so a silenced
+  // conversation costs nothing extra beyond the one Zernio read.
+  let takeover = { silence: false, justDetectedHuman: false, resumed: false };
+  if (accountId) {
+    try {
+      takeover = await checkHumanTakeover({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, memoryId });
+    } catch (err) {
+      console.error('[webhook] human-takeover check failed; continuing with normal AI reply:', err.message);
+    }
+  }
+
+  if (takeover.silence) {
+    await saveTurn('conversation', memoryId, 'customer', messageText);
+    await logLead({
+      platform, contact: senderHandle, type: messageType, message: messageText,
+      reply: '(not sent - a team member is already handling this conversation; AI is monitoring only)',
+      leadStatus: 'WARM', productInterest: '', escalated: false,
+      notes: takeover.justDetectedHuman ? 'human_takeover_detected' : 'human_takeover_silence_continuing',
+    });
+    await releaseReplySlot(replyKey);
+    return;
+  }
+
   const existingMemory = await loadContext('conversation', memoryId);
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
 
@@ -478,7 +535,7 @@ async function handleMessage(event) {
     result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   }
   result = mergeEscalation(result, messageText, false);
-  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory) };
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
   let sendError = '';
 
   if (accountId && result.reply) {
@@ -489,6 +546,7 @@ async function handleMessage(event) {
       await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply, idempotencyKey });
       try { await markReplySent(replyKey); }
       catch (err) { console.error('[webhook] DM sent but Redis status update failed:', err.message); }
+      await markAiSent(memoryId, result.reply);
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
@@ -510,6 +568,7 @@ async function handleMessage(event) {
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+    replySuggestion: result.replyImprovement || '',
   });
 
   await sendEscalationAlert(result, {
