@@ -11,7 +11,7 @@ const { classifyIntent, extractProduct } = require('../lib/intentRouter');
 const { getMemory, addTurn, formatMemory } = require('../lib/memoryStore');
 const { lookupLiveProduct, formatLiveProductData } = require('../lib/productResolver');
 const { mergeEscalation } = require('../lib/escalationPolicy');
-const { notifyEscalation } = require('../lib/escalationNotifier');
+const { notifyEscalation, notifyHotLead } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
@@ -246,6 +246,29 @@ async function sendEscalationAlert(result, details) {
   }
 }
 
+// Added 2026-09-24 (Ravi): a HOT lead that never escalates (see
+// knowledgeBase.js's ESCALATION_RULES - a plain price/product question is
+// never itself a reason to escalate) previously relied entirely on someone
+// checking the lead sheet to ever follow up. This closes that gap with a
+// lighter, separate "worth a follow-up" alert on the same channels -
+// deliberately skipped when result.escalate is true so a real escalation
+// never double-alerts (sendEscalationAlert above already covers that case).
+async function sendHotLeadAlert(result, details) {
+  if (result?.escalate) return;
+  if (result?.leadStatus !== 'HOT') return;
+  try {
+    await notifyHotLead({
+      ...details,
+      leadStatus: result.leadStatus,
+      productInterest: result.productInterest,
+      customerName: result.customerName || '',
+      customerPhone: result.customerPhone || extractFallbackPhone(details.message),
+    });
+  } catch (err) {
+    console.error('[hot-lead] alert failed; lead remains logged:', err.message);
+  }
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   let rawBody;
@@ -385,6 +408,10 @@ async function handleComment(event) {
   });
 
   await sendEscalationAlert(result, {
+    platform, contact: authorHandle, type: 'comment', message: commentText,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
+  });
+  await sendHotLeadAlert(result, {
     platform, contact: authorHandle, type: 'comment', message: commentText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
   });
@@ -572,6 +599,10 @@ async function handleMessage(event) {
   });
 
   await sendEscalationAlert(result, {
+    platform, contact: senderHandle, type: messageType, message: messageText,
+    reply: sendError ? '(send failed, see notes)' : result.reply,
+  });
+  await sendHotLeadAlert(result, {
     platform, contact: senderHandle, type: messageType, message: messageText,
     reply: sendError ? '(send failed, see notes)' : result.reply,
   });
