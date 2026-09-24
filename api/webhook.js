@@ -14,7 +14,8 @@ const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
-const { detectReplyLanguageNote } = require('../lib/knowledgeBase');
+const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
+const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -163,10 +164,54 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
 }
 
+// Best-effort fallback so a general enquiry that escalates (product
+// questions, images, prices, "rest everything" the AI can't answer) still
+// carries a phone number when one is plainly visible in what the customer
+// wrote - without ever blocking on it. Per Ravi's explicit instruction
+// (2026-09-24): for this general bucket, send whatever is already known,
+// never ask/hold up the handoff waiting for name+phone (that's reserved for
+// lib/sellerInquiryFlow.js, which collects City/Name/Phone by design before
+// escalating). A structured flow's own customerName/customerPhone (kundli,
+// consultation, seller) always takes priority over this regex guess.
+const PHONE_FALLBACK_PATTERN = /(\+?\d[\d\s-]{8,14}\d)/;
+function extractFallbackPhone(text) {
+  const match = String(text || '').match(PHONE_FALLBACK_PATTERN);
+  return match ? match[1].replace(/[\s-]/g, '') : '';
+}
+
+// Working-hours note - added 2026-09-24 (Ravi): whenever a message escalates
+// to a human (across Instagram DMs, comments, WhatsApp - any channel), the
+// customer must always be told when the team will actually follow up, so
+// they're not left wondering. Applied deterministically here, in ONE place
+// right after mergeEscalation() decides escalate=true, so it's never skipped
+// or paraphrased away regardless of which reply source produced the message
+// (replyEngine, kundliFlow, consultationFlow, sellerInquiryFlow) - same
+// "deterministic safety net" pattern as detectReplyLanguageNote elsewhere in
+// this codebase. 10 AM - 8 PM, all 7 days (Monday-Sunday, no weekly off),
+// per Ravi's explicit instruction.
+const WORKING_HOURS_NOTE_EN = "We've noted your query and shared it with the concerned team member - they'll personally get back to you between 10 AM - 8 PM (all 7 days, Monday to Sunday).";
+const WORKING_HOURS_NOTE_HI = 'Aapki query note kar li hai aur concerned team member ko bhej di hai - wo aapse 10 AM se 8 PM ke beech (Monday se Sunday, saare 7 din) khud personally contact karenge.';
+
+function appendWorkingHoursNote(reply, message, existingMemory) {
+  if (!reply) return reply;
+  const note = (looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory)) ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN;
+  if (reply.includes(note)) return reply; // never duplicate if already present
+  return `${reply}\n\n${note}`;
+}
+
 async function sendEscalationAlert(result, details) {
   if (!result?.escalate) return;
   try {
-    await notifyEscalation({ ...details, reason: result.escalateReason, leadStatus: result.leadStatus, productInterest: result.productInterest });
+    await notifyEscalation({
+      ...details,
+      reason: result.escalateReason,
+      leadStatus: result.leadStatus,
+      productInterest: result.productInterest,
+      category: result.category || '',
+      customerName: result.customerName || '',
+      customerPhone: result.customerPhone || extractFallbackPhone(details.message),
+      customerCity: result.customerCity || '',
+    });
   } catch (err) {
     console.error('[escalation] alert failed; lead remains logged:', err.message);
   }
@@ -278,6 +323,7 @@ async function handleComment(event) {
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
   let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   result = mergeEscalation(result, commentText, false);
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory) };
   let sendError = '';
 
   if (postId && accountId && result.reply) {
@@ -387,18 +433,33 @@ async function handleMessage(event) {
   const existingMemory = await loadContext('conversation', memoryId);
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
 
-  // Mannat 2.0: an isolated, additive branch (see lib/kundliFlow.js) that
-  // only ever engages when ENABLE_KUNDLI_FLOW=true. It returns null when
-  // not applicable, and the normal replyEngine path below runs unchanged -
-  // this line is the ENTIRE footprint of that feature on the live flow.
-  let result = await maybeHandleKundliTurn({
-    enabled: process.env.ENABLE_KUNDLI_FLOW === 'true',
+  // Seller/manufacturer inquiry flow (see lib/sellerInquiryFlow.js) - checked
+  // FIRST, before the customer-facing Kundli/consultation flows, since
+  // someone offering to SELL to GemRishi must never be mis-read as a
+  // customer asking about buying/consultation. Live by default (Ravi,
+  // 2026-09-24), same on/off convention as the consultation flow below.
+  let result = await maybeHandleSellerInquiry({
+    enabled: process.env.ENABLE_SELLER_INQUIRY_FLOW !== 'false',
     type: messageType,
     memoryId,
     message: messageText,
     intent: aiContext.intent,
     existingMemory,
   });
+  // Mannat 2.0: an isolated, additive branch (see lib/kundliFlow.js) that
+  // only ever engages when ENABLE_KUNDLI_FLOW=true. It returns null when
+  // not applicable, and the normal replyEngine path below runs unchanged -
+  // this line is the ENTIRE footprint of that feature on the live flow.
+  if (!result) {
+    result = await maybeHandleKundliTurn({
+      enabled: process.env.ENABLE_KUNDLI_FLOW === 'true',
+      type: messageType,
+      memoryId,
+      message: messageText,
+      intent: aiContext.intent,
+      existingMemory,
+    });
+  }
   // Consultation-plan payment flow (see lib/consultationFlow.js) - live by
   // default, independent of the Kundli flow above. Only engages when the
   // customer names a specific paid plan; otherwise it returns null and the
@@ -417,6 +478,7 @@ async function handleMessage(event) {
     result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   }
   result = mergeEscalation(result, messageText, false);
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory) };
   let sendError = '';
 
   if (accountId && result.reply) {
