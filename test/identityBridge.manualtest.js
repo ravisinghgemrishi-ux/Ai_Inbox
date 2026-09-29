@@ -10,6 +10,9 @@ process.env.REDIS_KV_REST_API_TOKEN = 'x';
 process.env.ZERNIO_API_KEY = 'x';
 process.env.ENABLE_IDENTITY_BRIDGE = 'true';
 delete process.env.ZERNIO_WEBHOOK_SECRET;
+process.env.WEBHOOK_FAST_ACK = 'false'; // tests await each reply
+process.env.HUMAN_TYPING_DELAY_SCALE = '0.001'; // real bubbles, near-zero pauses
+process.env.MESSAGE_BATCH_WAIT_MS = '60'; // real batching, short wait
 
 // ---------- fake Upstash Redis REST ----------
 const store = new Map();
@@ -23,6 +26,8 @@ function redisExec(parts) {
     case 'expire': return 1;
     case 'rpush': case 'lpush': { const l = store.get(key) || []; cmd === 'rpush' ? l.push(rest[0]) : l.unshift(rest[0]); store.set(key, l); return l.length; }
     case 'ltrim': { const l = store.get(key) || []; let [a, b] = rest.map(Number); if (a < 0) a = Math.max(0, l.length + a); if (b < 0) b = l.length + b; store.set(key, l.slice(a, b + 1)); return 'OK'; }
+    case 'hset': { const h = store.get(key) || {}; h[rest[0]] = rest[1]; store.set(key, h); return 1; }
+    case 'hgetall': { const h = store.get(key); if (!h) return []; return Object.entries(h).flat(); }
     case 'lrange': { const l = store.get(key) || []; return l.slice(0); }
     default: throw new Error('fake redis: unsupported ' + cmd);
   }
@@ -36,7 +41,7 @@ global.fetch = async (url, opts = {}) => {
     return { ok: true, json: async () => ({ result: redisExec(parts) }) };
   }
   if (url.includes('zernio.com')) {
-    sent.push({ url, body: JSON.parse(opts.body || '{}') });
+    sent.push({ url, body: JSON.parse(opts.body || '{}'), headers: opts.headers || {} });
     return { ok: true, json: async () => ({ ok: true }) };
   }
   throw new Error('unexpected fetch ' + url);
@@ -46,11 +51,24 @@ global.fetch = async (url, opts = {}) => {
 const lib = (f) => path.join(__dirname, '..', 'lib', f);
 const stub = (f, exports) => { require.cache[require.resolve(lib(f))] = { id: lib(f), filename: lib(f), loaded: true, exports }; };
 const aiCalls = [];
-stub('replyEngine.js', { generateReply: async (a) => { aiCalls.push(a); return { reply: `AI-REPLY(${a.message.slice(0, 30)})`, leadStatus: 'WARM', escalate: false }; } });
+stub('replyEngine.js', { generateReply: async (a) => {
+  aiCalls.push(a);
+  const m = a.message;
+  return {
+    reply: /MULTI/.test(m) ? 'Hi Rahul! Great choice.\n\nWe have Pukhraj around 5 ratti in stock.\n\nLoose stone or in a ring?' : `AI-REPLY(${m.slice(0, 30)})`, leadStatus: 'WARM', escalate: false,
+    customerName: (m.match(/name is (\w+)/i) || [])[1] || '',
+    customerCity: (m.match(/from (\w+)/i) || [])[1] || '',
+    customerBudget: (m.match(/budget is (\d+)/i) || [])[1] || '',
+    customerPurpose: /career/i.test(m) ? 'career growth' : '',
+    productInterest: /pukhraj|yellow sapphire/i.test(m) ? 'Yellow Sapphire ~5 ratti' : '',
+  };
+} });
 const leads = [];
 stub('leadLog.js', { logLead: async (l) => leads.push(l) });
-stub('escalationNotifier.js', { notifyEscalation: async () => {}, notifyHotLead: async () => {} });
-stub('humanTakeoverGuard.js', { checkHumanTakeover: async () => ({ silence: false }), markAiSent: async () => {} });
+const alerts = [];
+stub('escalationNotifier.js', { notifyEscalation: async (a) => { alerts.push(a); }, notifyHotLead: async () => {} });
+const aiMarked = [];
+stub('humanTakeoverGuard.js', { checkHumanTakeover: async () => ({ silence: false }), markAiSent: async (id, t) => { aiMarked.push({ t, sentBefore: sent.length }); } });
 stub('kundliFlow.js', { maybeHandleKundliTurn: async () => null });
 stub('consultationFlow.js', { maybeHandleConsultationPayment: async () => null });
 stub('sellerInquiryFlow.js', { maybeHandleSellerInquiry: async () => null });
@@ -166,10 +184,134 @@ const check = (name, fn) => results.push([name, fn]);
   check('Facebook Messenger gets no reply', () => assert.strictEqual(after, before));
 
   // 11. Duplicate webhook -> one response
-  const b2 = sent.length;
+  const onlyMsgs = () => sent.filter((x) => x.url.endsWith('/messages')).length;
+  const b2 = onlyMsgs();
   await waMsg('919812300006', 'hello', 'dup-1'); await waMsg('919812300006', 'hello', 'dup-1');
-  const a2 = sent.length;
+  const a2 = onlyMsgs();
   check('Duplicate webhook answered once', () => assert.strictEqual(a2, b2 + 1));
+
+  // 13. ANIL'S REAL CONVERSATION (2026-09-29): facts must survive the handoff
+  await igDm('anil', 'can we talk on whatsapp');
+  await igDm('anil', 'hi my name is Rahul');
+  await igDm('anil', 'i am from Hisar');
+  await igDm('anil', 'i want yellow sapphire around 5 ratti for career growth');
+  await igDm('anil', 'my budget is 50000');
+  await igDm('anil', 'can we continue on whatsapp');
+  const tokAnil = tokenIn(lastSentTo('anil').body.message);
+  await waMsg('918726559209', `Hi GemRishi, I'd like to continue here. Ref: ${tokAnil}`);
+  await waMsg('918726559209', 'whats my name');
+  const ctxName = lastAiFor('whats my name').contextText;
+  check('Anil: WhatsApp knows name, city, product, budget, purpose', () => {
+    for (const x of ['Name: Rahul', 'City: Hisar', 'Yellow Sapphire', 'Budget: 50000', 'Purpose: career growth']) assert(ctxName.includes(x), 'missing ' + x);
+  });
+  check('Anil: full Instagram chat carried over (incl. message 2)', () => assert(ctxName.includes('my name is Rahul')));
+  // 25 more messages on Instagram - the original "my name is Rahul" message
+  // falls out of the 12-message window, but the saved facts must remain.
+  for (let i = 0; i < 25; i++) await igDm('anil', `question number ${i}`);
+  await igDm('anil', 'remind me what i wanted');
+  const ctxLate = lastAiFor('remind me what i wanted').contextText;
+  check('Anil: facts survive 25+ messages later (old message gone, facts kept)', () => {
+    assert(!ctxLate.includes('my name is Rahul'), 'old message should have aged out');
+    assert(ctxLate.includes('Name: Rahul') && ctxLate.includes('Budget: 50000') && ctxLate.includes('City: Hisar'));
+  });
+  await igDm('anil', 'back on instagram, any update?');
+  check('Anil: facts also shown back on Instagram', () => assert(lastAiFor('back on instagram').contextText.includes('Name: Rahul')));
+
+  // 14. GOOGLE REVIEWS
+  process.env.ENABLE_REVIEW_REPLIES = 'true';
+  const review = (id, rating, text, extra = {}) => post({ id: 'evt-' + id, event: 'review.new', account: { accountId: 'gbp-acc', platform: 'googlebusiness' },
+    review: { id: `accounts/1/locations/2/reviews/${id}`, platform: 'googlebusiness', rating, text, reviewer: { name: 'Priya Sharma' }, createdAt: new Date().toISOString(), hasReply: false, ...extra } });
+  const reviewSends = () => sent.filter((x) => x.url.includes('/inbox/reviews/'));
+  const r0 = reviewSends().length;
+  await review('r5', 5, 'Beautiful Pukhraj, great service!');
+  const r5 = reviewSends().slice(-1)[0]; const rAfter5 = reviewSends().length;
+  check('5-star review: reply posted automatically, signed Team GemRishi, correct endpoint', () => {
+    assert.strictEqual(rAfter5, r0 + 1);
+    assert(r5.url.includes(encodeURIComponent('accounts/1/locations/2/reviews/r5')), r5.url);
+    assert.strictEqual(r5.body.accountId, 'gbp-acc'); assert(/Team GemRishi$/.test(r5.body.message));
+  });
+  const a0 = alerts.length; const r1 = reviewSends().length;
+  await review('r2', 2, 'Delivery was late and nobody replied');
+  const rAfter2 = reviewSends().length; const aAfter2 = alerts.length; const lastReason = alerts[alerts.length - 1]?.reason || '';
+  check('2-star review: reply posted automatically AND team gets an FYI alert', () => {
+    assert.strictEqual(rAfter2, r1 + 1);
+    assert.strictEqual(aAfter2, a0 + 1); assert(/FYI: 2★/.test(lastReason) && /already replied publicly/.test(lastReason));
+  });
+  const a5 = alerts.length; await review('r5b', 5, 'Lovely');
+  const a5after = alerts.length;
+  check('5-star review: no alert needed', () => assert.strictEqual(a5after, a5));
+  await review('r5', 5, 'Beautiful Pukhraj, great service!'); // Zernio redelivers the same event
+  await post({ id: 'evt-r5-again', event: 'review.new', account: { accountId: 'gbp-acc' }, review: { id: 'accounts/1/locations/2/reviews/r5', rating: 5, text: 'x', reviewer: { name: 'P' }, hasReply: false } });
+  check('Same review delivered twice: replied once', () => assert.strictEqual(reviewSends().filter((x) => x.url.includes(encodeURIComponent('reviews/r5') + '/reply')).length, 1));
+  const r2 = reviewSends().length;
+  await review('r6', 5, 'Great', { hasReply: true });
+  await post({ id: 'evt-upd', event: 'review.updated', account: { accountId: 'gbp-acc' }, review: { id: 'accounts/1/locations/2/reviews/r7', rating: 5, text: 'edited', reviewer: { name: 'A' }, hasReply: false } });
+  process.env.ENABLE_REVIEW_REPLIES = 'false';
+  const l0 = leads.length;
+  await review('r8', 5, 'Nice');
+  const r3 = reviewSends().length; const l1 = leads.length; const lastReply = leads[leads.length - 1].reply;
+  check('Already-replied, review.updated, and switch-off: nothing posted (switch-off still logged)', () => {
+    assert.strictEqual(r3, r2);
+    assert.strictEqual(l1, l0 + 1); assert(/switched off/.test(lastReply));
+  });
+
+  // 15. HUMAN-LIKE TYPING
+  const s0 = sent.length; const m0 = aiMarked.length;
+  await waMsg('919812377777', 'MULTI please');
+  const waBubbles = sent.slice(s0);
+  const msgs = waBubbles.filter((x) => x.url.endsWith('/messages'));
+  const typings = waBubbles.filter((x) => x.url.endsWith('/typing'));
+  const marks = aiMarked.slice(m0);
+  check('WhatsApp reply sent as 3 separate bubbles with typing indicator before each', () => {
+    assert.deepStrictEqual(msgs.map((x) => x.body.message), ['Hi Rahul! Great choice.', 'We have Pukhraj around 5 ratti in stock.', 'Loose stone or in a ring?']);
+    assert.strictEqual(typings.length, 3);
+    assert.strictEqual(new Set(msgs.map((x) => x.headers?.['Idempotency-Key'] || '')).size, 3);
+  });
+  check('Each bubble registered as Mannat\'s BEFORE it is sent (human-takeover safety)', () => {
+    for (const b of ['Hi Rahul! Great choice.', 'We have Pukhraj around 5 ratti in stock.', 'Loose stone or in a ring?']) {
+      const mk = marks.find((x) => x.t === b); assert(mk, 'not marked: ' + b);
+      const sendIdx = waBubbles.findIndex((x) => x.body.message === b);
+      assert(mk.sentBefore <= s0 + sendIdx, 'marked after sending: ' + b);
+    }
+  });
+  const c0 = sent.length;
+  await igComment('multiuser', 'MULTI comment');
+  const cSends = sent.slice(c0).filter((x) => x.url.includes('/inbox/comments/'));
+  check('Public comment stays ONE message (no bubbles)', () => assert.strictEqual(cSends.length, 1));
+  process.env.HUMAN_TYPING = 'false';
+  const o0 = sent.length; await waMsg('919812377778', 'MULTI off');
+  const offMsgs = sent.slice(o0).filter((x) => x.url.endsWith('/messages')).length;
+  process.env.HUMAN_TYPING = '';
+  check('HUMAN_TYPING=false: back to one message', () => assert.strictEqual(offMsgs, 1));
+
+  // 16. QUICK MESSAGES ANSWERED TOGETHER
+  const q0 = aiCalls.length; const qs0 = sent.filter((x) => x.url.endsWith('/messages')).length;
+  await Promise.all([
+    waMsg('919812388888', 'hi'),
+    new Promise((r) => setTimeout(r, 10)).then(() => waMsg('919812388888', 'pukhraj chahiye')),
+    new Promise((r) => setTimeout(r, 25)).then(() => waMsg('919812388888', 'price kya hai')),
+  ]);
+  const burstCalls = aiCalls.slice(q0);
+  const burstSends = sent.filter((x) => x.url.endsWith('/messages')).length - qs0;
+  check('3 quick messages -> Mannat reads all 3 and replies ONCE', () => {
+    assert.strictEqual(burstCalls.length, 1, 'AI called ' + burstCalls.length + ' times');
+    for (const t of ['hi', 'pukhraj chahiye', 'price kya hai']) assert(burstCalls[0].message.includes(t), 'missing ' + t);
+    assert.strictEqual(burstSends, 1);
+  });
+  // two customers bursting at the same time stay separate
+  const p0 = aiCalls.length;
+  await Promise.all([waMsg('919812300101', 'A1 emerald'), waMsg('919812300202', 'B1 ruby'), waMsg('919812300101', 'A2 price'), waMsg('919812300202', 'B2 size')]);
+  const pc = aiCalls.slice(p0);
+  check('Two customers bursting at once: one reply each, never mixed', () => {
+    assert.strictEqual(pc.length, 2);
+    const a = pc.find((c) => c.message.includes('A1')); const b = pc.find((c) => c.message.includes('B1'));
+    assert(a && a.message.includes('A2') && !a.message.includes('B')); assert(b && b.message.includes('B2') && !b.message.includes('A'));
+  });
+  // a message sent after the wait gets its own reply
+  const l2 = aiCalls.length;
+  await waMsg('919812388888', 'thanks');
+  const l3 = aiCalls.length;
+  check('A later message (after the wait) gets its own normal reply', () => assert.strictEqual(l3, l2 + 1));
 
   // 12. Switch OFF -> behaviour exactly as before
   process.env.ENABLE_IDENTITY_BRIDGE = 'false';
