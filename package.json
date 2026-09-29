@@ -8,7 +8,8 @@
     "start": "node local-server.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "@vercel/functions": "^3.9.9"
   },
   "engines": {
     "node": ">=18"
