@@ -60,6 +60,7 @@ stub('replyEngine.js', { generateReply: async (a) => {
     reply: /MULTI/.test(m) ? 'Hi Rahul! Great choice.\n\nWe have Pukhraj around 5 ratti in stock.\n\nLoose stone or in a ring?' : `AI-REPLY(${m.slice(0, 30)})`, leadStatus: 'WARM', escalate: false,
     customerName: (m.match(/name is (\w+)/i) || [])[1] || '',
     customerCity: (m.match(/from (\w+)/i) || [])[1] || '',
+    customerPhone: (m.match(/\b(\d{10})\b/) || [])[1] || '',
     customerBudget: (m.match(/budget is (\d+)/i) || [])[1] || '',
     customerPurpose: /career/i.test(m) ? 'career growth' : '',
     productInterest: /pukhraj|yellow sapphire/i.test(m) ? 'Yellow Sapphire ~5 ratti' : '',
@@ -71,7 +72,8 @@ const alerts = [];
 stub('escalationNotifier.js', { notifyEscalation: async (a) => { alerts.push(a); }, notifyHotLead: async () => {} });
 const aiMarked = [];
 stub('humanTakeoverGuard.js', { checkHumanTakeover: async () => ({ silence: false }), markAiSent: async (id, t) => { aiMarked.push({ t, sentBefore: sent.length }); } });
-stub('kundliFlow.js', { maybeHandleKundliTurn: async () => null });
+const flowCalls = [];
+stub('kundliFlow.js', { maybeHandleKundliTurn: async (a) => { flowCalls.push(a); return null; } });
 stub('consultationFlow.js', { maybeHandleConsultationPayment: async () => null });
 stub('sellerInquiryFlow.js', { maybeHandleSellerInquiry: async () => null });
 stub('productResolver.js', { lookupLiveProduct: async () => ({ found: false, products: [] }), formatLiveProductData: () => '' });
@@ -355,6 +357,35 @@ const check = (name, fn) => results.push([name, fn]);
   const cm2i = sent.length; await igComment('commenter9', 'pukhraj price?');
   const cm2 = sent.slice(cm2i).find((x) => x.url.includes('/inbox/comments/'))?.body.message || '';
   check('Comment: one soft WhatsApp line with the number, only once per person', () => { assert(/98179 75977/.test(cm1), cm1); assert(!/98179 75977/.test(cm2)); });
+
+  // 18. NEVER ASK FOR THE NUMBER ON WHATSAPP
+  let w0 = sent.length;
+  await waMsg('919812366666', 'my order is damaged, I want a refund');
+  const escReply = sent.slice(w0).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
+  const escCtx = lastAiFor('order is damaged').contextText;
+  const flowMem = flowCalls[flowCalls.length - 1]?.existingMemory || '';
+  check('WhatsApp escalation: never asks for contact number (asks name only)', () => {
+    assert(!/contact number|phone/i.test(escReply), escReply);
+    assert(/share your name/i.test(escReply), escReply);
+  });
+  check('WhatsApp: AI told the number is known; Kundli/payment flows get it pre-filled', () => {
+    assert(/Never ask for their number/.test(escCtx)); assert(/Phone: \+919812366666/.test(escCtx));
+    assert(/My contact number is \+919812366666/.test(flowMem), flowMem);
+  });
+  await waMsg('919812366666', 'my name is Sunita');
+  w0 = sent.length; await waMsg('919812366666', 'still no refund, very bad');
+  const esc2 = sent.slice(w0).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
+  check('WhatsApp: once name is known too, no details asked at all', () => { assert(!/share your (name|contact)|contact number/i.test(esc2), esc2); });
+  // Instagram customer who gave their number earlier (Anil gave none; use new one)
+  await igDm('igp', 'hi'); 
+  await post({ event: 'message.received', account: { platform: 'instagram', accountId: 'acc-ig' }, conversation: { id: 'igp', participantUsername: 'igp_user', participantId: 'igsid_igp' }, message: { id: 'm-igp-ph', text: 'my name is Kavita, number 9876543210' } });
+  await igDm('igp', 'which stone is good for me?');
+  const igFlow = flowCalls[flowCalls.length - 1]?.existingMemory || '';
+  const igCtx = lastAiFor('which stone is good').contextText;
+  check('Instagram: name and number given earlier are known in later messages (no re-asking)', () => {
+    assert(/My name is Kavita/.test(igFlow) && /My contact number is 9876543210/.test(igFlow), igFlow);
+    assert(/Name: Kavita/.test(igCtx) && /Phone: 9876543210/.test(igCtx));
+  });
 
   // 12. Switch OFF -> behaviour exactly as before
   process.env.ENABLE_IDENTITY_BRIDGE = 'false';
