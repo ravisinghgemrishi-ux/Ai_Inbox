@@ -38,7 +38,8 @@ global.fetch = async (url, opts = {}) => {
   if (url.startsWith('https://fake-redis')) {
     const parts = url.slice('https://fake-redis/'.length).split('/').map(decodeURIComponent);
     await new Promise((r) => setTimeout(r, Math.random() * 5)); // shuffle ordering like a real network
-    return { ok: true, json: async () => ({ result: redisExec(parts) }) };
+    const result = redisExec(parts); // executes on request, like real Redis
+    return { ok: true, json: async () => ({ result }) };
   }
   if (url.includes('zernio.com')) {
     sent.push({ url, body: JSON.parse(opts.body || '{}'), headers: opts.headers || {} });
@@ -55,6 +56,7 @@ stub('replyEngine.js', { generateReply: async (a) => {
   aiCalls.push(a);
   const m = a.message;
   return {
+    leadStatus: /price|pukhraj|emerald/i.test(m) ? 'HOT' : 'WARM',
     reply: /MULTI/.test(m) ? 'Hi Rahul! Great choice.\n\nWe have Pukhraj around 5 ratti in stock.\n\nLoose stone or in a ring?' : `AI-REPLY(${m.slice(0, 30)})`, leadStatus: 'WARM', escalate: false,
     customerName: (m.match(/name is (\w+)/i) || [])[1] || '',
     customerCity: (m.match(/from (\w+)/i) || [])[1] || '',
@@ -312,6 +314,47 @@ const check = (name, fn) => results.push([name, fn]);
   await waMsg('919812388888', 'thanks');
   const l3 = aiCalls.length;
   check('A later message (after the wait) gets its own normal reply', () => assert.strictEqual(l3, l2 + 1));
+
+  // 17. ONE-TIME WHATSAPP INVITATION
+  const INV = /would it be okay to continue on WhatsApp|WhatsApp par baat continue karein/;
+  const lastMsgsTo = (conv, since) => sent.slice(since).filter((x) => x.url.includes(encodeURIComponent(conv)) && x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
+  let k = sent.length; await igDm('inv1', 'hello');
+  const firstReply = lastMsgsTo('inv1', k);
+  k = sent.length; await igDm('inv1', 'emerald price?');
+  const secondReply = lastMsgsTo('inv1', k);
+  check('Invite: never in the first reply; asked once interest is shown', () => { assert(!INV.test(firstReply)); assert(INV.test(secondReply), secondReply); });
+  const ai0 = aiCalls.length; k = sent.length; await igDm('inv1', 'haan');
+  const yesReply = lastMsgsTo('inv1', k); const aiAfterYes = aiCalls.length;
+  check('Invite: customer says "haan" -> personal WhatsApp link, no AI guesswork', () => { assert(/wa\.me\/919817975977/.test(yesReply) && /WH-/.test(yesReply), yesReply); assert.strictEqual(aiAfterYes, ai0); });
+  k = sent.length; await igDm('inv1', 'emerald 5 ratti price again?');
+  const afterAccept = lastMsgsTo('inv1', k);
+  check('Invite: never asked again after yes', () => assert(!INV.test(afterAccept)));
+
+  await igDm('inv2', 'hi'); await igDm('inv2', 'pukhraj price');
+  k = sent.length; await igDm('inv2', 'nahi yahin theek hai');
+  const noCtx = lastAiFor('nahi yahin').contextText; const noReply = lastMsgsTo('inv2', k);
+  k = sent.length; for (const q of ['emerald price', 'pukhraj price 5 ratti', 'ok']) await igDm('inv2', q);
+  const laterNo = lastMsgsTo('inv2', k);
+  check('Invite: customer says no -> respected, AI told, never asked again', () => {
+    assert(/prefers to continue chatting here/.test(noCtx)); assert(!/wa\.me/.test(noReply)); assert(!INV.test(laterNo));
+  });
+
+  await igDm('inv3', 'hi'); await igDm('inv3', 'emerald price');
+  k = sent.length; await igDm('inv3', 'what is the origin?'); await igDm('inv3', 'pukhraj price'); await igDm('inv3', 'price of ruby');
+  const ignored = lastMsgsTo('inv3', k);
+  check('Invite: customer ignores it -> normal chat, never asked again', () => { assert(!INV.test(ignored)); assert(!/wa\.me/.test(ignored)); });
+
+  k = sent.length; await waMsg('919812399990', 'hi'); await waMsg('919812399990', 'emerald price');
+  const waSide = sent.slice(k).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
+  k = sent.length; await igDm('anil', 'emerald price please');
+  const anilSide = lastMsgsTo('anil', k);
+  check('Invite: never on WhatsApp itself, never to customers already linked to WhatsApp', () => { assert(!INV.test(waSide)); assert(!INV.test(anilSide)); });
+
+  const cm0 = sent.length; await igComment('commenter9', 'emerald price?');
+  const cm1 = sent.slice(cm0).find((x) => x.url.includes('/inbox/comments/'))?.body.message || '';
+  const cm2i = sent.length; await igComment('commenter9', 'pukhraj price?');
+  const cm2 = sent.slice(cm2i).find((x) => x.url.includes('/inbox/comments/'))?.body.message || '';
+  check('Comment: one soft WhatsApp line with the number, only once per person', () => { assert(/98179 75977/.test(cm1), cm1); assert(!/98179 75977/.test(cm2)); });
 
   // 12. Switch OFF -> behaviour exactly as before
   process.env.ENABLE_IDENTITY_BRIDGE = 'false';
