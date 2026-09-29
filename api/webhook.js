@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const {
   verifyWebhookSignature,
   replyToComment,
+  replyToReview,
+  sendTypingIndicator,
   sendConversationMessage,
   messageReplyIdempotencyKey,
 } = require('../lib/zernioClient');
@@ -19,7 +21,19 @@ const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowle
 const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
-const { prepareInbound, addHandoffCta, identityNotes } = require('../lib/crossChannel');
+const { prepareInbound, addHandoffCta, saveCustomerFacts, identityNotes } = require('../lib/crossChannel');
+const { handleReview } = require('../lib/reviewHandler');
+const { sendLikeHuman } = require('../lib/humanTyping');
+const { collectBurst } = require('../lib/messageBatcher');
+
+// Added 2026-09-29 (Ravi): Zernio was delivering every message twice - it
+// gives up waiting after ~15s, and Mannat takes longer than that to write a
+// reply, so Zernio retried. Now the webhook answers "received" straight away
+// and writes/sends the reply in the background (Vercel's waitUntil keeps the
+// function alive until it finishes). The duplicate check still runs BEFORE
+// the quick answer, so a retry is still recognised and ignored.
+let waitUntil = null;
+try { ({ waitUntil } = require('@vercel/functions')); } catch { waitUntil = null; }
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -296,6 +310,11 @@ module.exports = async (req, res) => {
     console.error('[webhook] duplicate protection unavailable; continuing with reply:', err.message);
   }
 
+  if (waitUntil && process.env.WEBHOOK_FAST_ACK !== 'false') {
+    waitUntil(handleEvent(body).catch((err) => console.error('[webhook] error handling event (background):', err)));
+    return res.status(200).json({ received: true, processing: 'background' });
+  }
+
   try {
     await handleEvent(body);
     return res.status(200).json({ received: true, processed: true });
@@ -317,6 +336,11 @@ function readRawBody(req) {
 async function handleEvent(event) {
   if (event?.event === 'comment.received') return handleComment(event);
   if (event?.event === 'message.received') return handleMessage(event);
+  // Added 2026-09-29 (Ravi): Google Business Profile reviews. review.updated
+  // (an edit, or our own reply being added) is deliberately ignored.
+  if (event?.event === 'review.new') {
+    return handleReview(event, { generateReply, replyToReview, logLead, notifyEscalation, claimReplySlot, markReplySent, releaseReplySlot });
+  }
   console.log('[webhook] ignored event type:', event?.event);
 }
 
@@ -377,6 +401,7 @@ async function handleComment(event) {
   const existingMemory = await loadContext('comment', memoryId);
   const identity = await prepareInbound({ platform, event, messageText: commentText, platformUserId: comment.author?.id, handle: authorHandle });
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
+  if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
   let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   result = mergeEscalation(result, commentText, false);
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result) };
@@ -387,6 +412,7 @@ async function handleComment(event) {
     intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
   });
   result = { ...result, reply: cta.reply };
+  await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
   if (postId && accountId && result.reply) {
@@ -438,7 +464,7 @@ async function handleMessage(event) {
   const accountId = account.accountId || account.id;
   const conversationId = conversation.id || conversation.conversationId;
   const messageId = message.id || message.messageId;
-  const messageText = message.text || message.message || '';
+  let messageText = message.text || message.message || '';
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
 
@@ -498,6 +524,22 @@ async function handleMessage(event) {
   }
 
   const memoryId = `${platform || 'social'}:${conversationId}`;
+
+  // Added 2026-09-29 (Ravi): wait a few seconds for follow-up messages and
+  // answer them all together in one reply, like a person would.
+  const burst = await collectBurst({
+    chatId: memoryId,
+    messageKey: messageId || replyKey,
+    text: messageText,
+    redis: (path) => redisCommand(path),
+  });
+  if (!burst.answerNow) {
+    console.log('[webhook] message folded into a combined reply:', burst.reason);
+    await releaseReplySlot(replyKey);
+    return;
+  }
+  if (burst.count > 1) console.log(`[webhook] answering ${burst.count} quick messages together`);
+  messageText = burst.text;
 
   // Human-takeover guard (DMs only, per Ravi 2026-09-24) - see
   // lib/humanTakeoverGuard.js for the full design and its one hard
@@ -589,6 +631,7 @@ async function handleMessage(event) {
     intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
   });
   result = { ...result, reply: cta.reply };
+  await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
   if (accountId && result.reply) {
@@ -596,7 +639,19 @@ async function handleMessage(event) {
       const idempotencyKey = messageId
         ? messageReplyIdempotencyKey({ conversationId, accountId, messageId })
         : undefined;
-      await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: result.reply, idempotencyKey });
+      // Added 2026-09-29 (Ravi): sent like a person chatting - 1-3 short
+      // bubbles, natural pauses, "typing..." where supported. Each bubble is
+      // registered with markAiSent BEFORE it is sent so the human-takeover
+      // detector always recognises it as Mannat's, never as a team member's.
+      await sendLikeHuman({
+        reply: result.reply,
+        typing: () => sendTypingIndicator({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId }),
+        beforeSend: (text) => markAiSent(memoryId, text),
+        send: (text, i) => sendConversationMessage({
+          apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text,
+          idempotencyKey: idempotencyKey ? (i === 0 ? idempotencyKey : `${idempotencyKey}-p${i}`) : undefined,
+        }),
+      });
       try { await markReplySent(replyKey); }
       catch (err) { console.error('[webhook] DM sent but Redis status update failed:', err.message); }
       await markAiSent(memoryId, result.reply);
