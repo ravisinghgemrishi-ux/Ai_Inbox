@@ -23,6 +23,9 @@ const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
 const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
 const { handleReview } = require('../lib/reviewHandler');
+const { handleTeamMessage } = require('../lib/teamMonitor');
+const { getMemory: monitorGetMemory, addTurn: monitorAddTurn } = require('../lib/memoryStore');
+const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
 const { collectBurst } = require('../lib/messageBatcher');
 
@@ -340,6 +343,19 @@ function readRawBody(req) {
 
 async function handleEvent(event) {
   if (event?.event === 'comment.received') return handleComment(event);
+  // Added 2026-09-30 (Ravi): team WhatsApp monitoring. A message (incoming OR
+  // the staff's own outgoing reply) on a monitored business number is watched
+  // and logged only - Mannat never replies there. If the monitor claims it,
+  // we return immediately, so it never reaches the customer-reply/send code.
+  if (event?.event === 'message.received' || event?.event === 'message.sent') {
+    try {
+      const claimed = await handleTeamMessage(event, { getMemory: monitorGetMemory, addTurn: monitorAddTurn, knowledgeBase: KNOWLEDGE_BASE, lookupLiveProduct, formatLiveProductData });
+      if (claimed) return;
+    } catch (err) {
+      console.error('[webhook] team monitor error (message not on customer path):', err.message);
+      if (event?.event === 'message.sent') return; // outgoing staff replies never go to the customer path
+    }
+  }
   if (event?.event === 'message.received') return handleMessage(event);
   // Added 2026-09-29 (Ravi): Google Business Profile reviews. review.updated
   // (an edit, or our own reply being added) is deliberately ignored.
