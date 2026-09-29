@@ -17,6 +17,9 @@ const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
 const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
+// Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
+// Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
+const { prepareInbound, addHandoffCta, identityNotes } = require('../lib/crossChannel');
 
 module.exports.config = { api: { bodyParser: false } };
 
@@ -372,10 +375,18 @@ async function handleComment(event) {
   }
 
   const existingMemory = await loadContext('comment', memoryId);
+  const identity = await prepareInbound({ platform, event, messageText: commentText, platformUserId: comment.author?.id, handle: authorHandle });
   const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
   let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
   result = mergeEscalation(result, commentText, false);
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result) };
+  const cta = await addHandoffCta({
+    identity, reply: result.reply, messageText: commentText, existingMemory, memoryScope: 'comment', memoryId,
+    platformUserId: comment.author?.id || authorHandle, commentId, postId, isComment: true,
+    hindi: looksHinglishOrHindi(commentText) || looksHinglishOrHindi(existingMemory),
+    intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
+  });
+  result = { ...result, reply: cta.reply };
   let sendError = '';
 
   if (postId && accountId && result.reply) {
@@ -403,7 +414,7 @@ async function handleComment(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
@@ -514,8 +525,16 @@ async function handleMessage(event) {
     return;
   }
 
-  const existingMemory = await loadContext('conversation', memoryId);
+  const identity = await prepareInbound({
+    platform, event, messageText, conversationId,
+    platformUserId: conversation.participantId || `conv_${conversationId}`, handle: senderHandle,
+  });
+  const ownMemory = await loadContext('conversation', memoryId);
+  // For a WhatsApp customer who arrived via a handoff link, their earlier
+  // Instagram chat is placed before this chat's own history.
+  const existingMemory = [identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
+  if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
 
   // Seller/manufacturer inquiry flow (see lib/sellerInquiryFlow.js) - checked
   // FIRST, before the customer-facing Kundli/consultation flows, since
@@ -563,6 +582,13 @@ async function handleMessage(event) {
   }
   result = mergeEscalation(result, messageText, false);
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
+  const cta = await addHandoffCta({
+    identity, reply: result.reply, messageText, existingMemory, memoryScope: 'conversation', memoryId,
+    conversationId, platformUserId: conversation.participantId || senderHandle, isComment: false,
+    hindi: looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory),
+    intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
+  });
+  result = { ...result, reply: cta.reply };
   let sendError = '';
 
   if (accountId && result.reply) {
@@ -594,7 +620,7 @@ async function handleMessage(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
