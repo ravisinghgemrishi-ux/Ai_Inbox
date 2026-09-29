@@ -1,406 +1,77 @@
-// Manual end-to-end test for the GR Customer ID + WhatsApp handoff.
-// Runs the REAL api/webhook.js with Redis, Zernio, Gemini, lead log and alerts
-// replaced by in-memory fakes.   Run:  node test/identityBridge.manual-test.js
-const assert = require('assert');
-const path = require('path');
-const { EventEmitter } = require('events');
-
-process.env.REDIS_KV_REST_API_URL = 'https://fake-redis';
-process.env.REDIS_KV_REST_API_TOKEN = 'x';
-process.env.ZERNIO_API_KEY = 'x';
-process.env.ENABLE_IDENTITY_BRIDGE = 'true';
+const assert = require('assert'); const path = require('path'); const { EventEmitter } = require('events');
+Object.assign(process.env, { REDIS_KV_REST_API_URL: 'https://fake-redis', REDIS_KV_REST_API_TOKEN: 'x', ZERNIO_API_KEY: 'x', GEMINI_API_KEY: 'g',
+  ENABLE_IDENTITY_BRIDGE: 'true', ENABLE_TEAM_MONITOR: 'true', TEAM_MONITOR_WEBHOOK_URL: 'https://sheet-hook', TEAM_MONITOR_SECRET: 'k1', MESSAGE_BATCH_WAIT_MS: '30', HUMAN_TYPING_DELAY_SCALE: '0.001' });
 delete process.env.ZERNIO_WEBHOOK_SECRET;
-process.env.WEBHOOK_FAST_ACK = 'false'; // tests await each reply
-process.env.HUMAN_TYPING_DELAY_SCALE = '0.001'; // real bubbles, near-zero pauses
-process.env.MESSAGE_BATCH_WAIT_MS = '60'; // real batching, short wait
+const cfg = require('/home/claude/live4/lib/teamMonitor.config.js');
+cfg.TEAM_WHATSAPP_NUMBERS.push('919999900000', '919817975977'); // 2nd = Mannat's own number, listed BY MISTAKE
+cfg.TEAM_MEMBERS.push({ id: 'agent-neel', name: 'Neel Das', phone: '', role: 'Sales Lead' });
 
-// ---------- fake Upstash Redis REST ----------
-const store = new Map();
-function redisExec(parts) {
-  const [cmd, key, ...rest] = parts;
-  switch (cmd) {
-    case 'get': return store.has(key) ? store.get(key) : null;
-    case 'set': { const nx = rest.includes('NX'); if (nx && store.has(key)) return null; store.set(key, rest[0]); return 'OK'; }
-    case 'del': store.delete(key); return 1;
-    case 'incr': { const v = Number(store.get(key) || 0) + 1; store.set(key, String(v)); return v; }
-    case 'expire': return 1;
-    case 'rpush': case 'lpush': { const l = store.get(key) || []; cmd === 'rpush' ? l.push(rest[0]) : l.unshift(rest[0]); store.set(key, l); return l.length; }
-    case 'ltrim': { const l = store.get(key) || []; let [a, b] = rest.map(Number); if (a < 0) a = Math.max(0, l.length + a); if (b < 0) b = l.length + b; store.set(key, l.slice(a, b + 1)); return 'OK'; }
-    case 'hset': { const h = store.get(key) || {}; h[rest[0]] = rest[1]; store.set(key, h); return 1; }
-    case 'hgetall': { const h = store.get(key); if (!h) return []; return Object.entries(h).flat(); }
-    case 'lrange': { const l = store.get(key) || []; return l.slice(0); }
-    default: throw new Error('fake redis: unsupported ' + cmd);
-  }
-}
-const sent = [];
-global.fetch = async (url, opts = {}) => {
-  url = String(url);
-  if (url.startsWith('https://fake-redis')) {
-    const parts = url.slice('https://fake-redis/'.length).split('/').map(decodeURIComponent);
-    await new Promise((r) => setTimeout(r, Math.random() * 5)); // shuffle ordering like a real network
-    const result = redisExec(parts); // executes on request, like real Redis
-    return { ok: true, json: async () => ({ result }) };
-  }
-  if (url.includes('zernio.com')) {
-    sent.push({ url, body: JSON.parse(opts.body || '{}'), headers: opts.headers || {} });
-    return { ok: true, json: async () => ({ ok: true }) };
-  }
-  throw new Error('unexpected fetch ' + url);
-};
-
-// ---------- stub heavy modules ----------
-const lib = (f) => path.join(__dirname, '..', 'lib', f);
-const stub = (f, exports) => { require.cache[require.resolve(lib(f))] = { id: lib(f), filename: lib(f), loaded: true, exports }; };
-const aiCalls = [];
-stub('replyEngine.js', { generateReply: async (a) => {
-  aiCalls.push(a);
-  const m = a.message;
-  return {
-    leadStatus: /price|pukhraj|emerald/i.test(m) ? 'HOT' : 'WARM',
-    reply: /MULTI/.test(m) ? 'Hi Rahul! Great choice.\n\nWe have Pukhraj around 5 ratti in stock.\n\nLoose stone or in a ring?' : `AI-REPLY(${m.slice(0, 30)})`, leadStatus: 'WARM', escalate: false,
-    customerName: (m.match(/name is (\w+)/i) || [])[1] || '',
-    customerCity: (m.match(/from (\w+)/i) || [])[1] || '',
-    customerPhone: (m.match(/\b(\d{10})\b/) || [])[1] || '',
-    customerBudget: (m.match(/budget is (\d+)/i) || [])[1] || '',
-    customerPurpose: /career/i.test(m) ? 'career growth' : '',
-    productInterest: /pukhraj|yellow sapphire/i.test(m) ? 'Yellow Sapphire ~5 ratti' : '',
-  };
-} });
-const leads = [];
-stub('leadLog.js', { logLead: async (l) => leads.push(l) });
-const alerts = [];
-stub('escalationNotifier.js', { notifyEscalation: async (a) => { alerts.push(a); }, notifyHotLead: async () => {} });
-const aiMarked = [];
-stub('humanTakeoverGuard.js', { checkHumanTakeover: async () => ({ silence: false }), markAiSent: async (id, t) => { aiMarked.push({ t, sentBefore: sent.length }); } });
-const flowCalls = [];
-stub('kundliFlow.js', { maybeHandleKundliTurn: async (a) => { flowCalls.push(a); return null; } });
-stub('consultationFlow.js', { maybeHandleConsultationPayment: async () => null });
-stub('sellerInquiryFlow.js', { maybeHandleSellerInquiry: async () => null });
-stub('productResolver.js', { lookupLiveProduct: async () => ({ found: false, products: [] }), formatLiveProductData: () => '' });
-
-const webhook = require('../api/webhook');
-
-let seq = 0;
-function post(body) {
-  return new Promise((resolve) => {
-    const req = new EventEmitter(); req.method = 'POST'; req.headers = {};
-    const res = { statusCode: 0, status(c) { this.statusCode = c; return this; }, json(b) { resolve({ status: this.statusCode, body: b }); } };
-    webhook(req, res);
-    setImmediate(() => { req.emit('data', Buffer.from(JSON.stringify(body))); req.emit('end'); });
-  });
-}
-const igDm = (conv, text, extra = {}) => post({ event: 'message.received', account: { platform: 'instagram', accountId: 'acc-ig' }, conversation: { id: conv, participantUsername: conv + '_user', participantId: 'igsid_' + conv }, message: { id: `m${++seq}`, text, ...extra } });
-const waMsg = (phone, text, id) => post({ event: 'message.received', account: { platform: 'whatsapp', accountId: 'acc-wa' }, conversation: { id: 'wa_' + phone, participantPhone: phone }, message: { id: id || `m${++seq}`, text } });
-const igComment = (author, text) => post({ event: 'comment.received', account: { platform: 'instagram', accountId: 'acc-ig' }, post: { id: 'post-1' }, comment: { id: `c${++seq}`, text, author: { id: 'igu_' + author, username: author } } });
-const lastSentTo = (convOrPost) => [...sent].reverse().find((s) => s.url.includes(encodeURIComponent(convOrPost)));
-const tokenIn = (text) => (String(text).match(/WH-[A-Z0-9]{7}/) || [])[0];
-const lastAiFor = (needle) => [...aiCalls].reverse().find((c) => c.message.includes(needle));
-const results = [];
-const check = (name, fn) => results.push([name, fn]);
+const store = new Map(); const sheetRows = []; const zernio = []; const reviewCalls = []; let customerAiCalls = 0; let leadLogCalls = 0; let reviewFail = false;
+function ex(p){const[c,k,...r]=p;switch(c){case 'get':return store.has(k)?store.get(k):null;case 'set':{if(r.includes('NX')&&store.has(k))return null;store.set(k,r[0]);return 'OK';}case 'del':store.delete(k);return 1;case 'incr':{const v=Number(store.get(k)||0)+1;store.set(k,String(v));return v;}case 'expire':return 1;case 'rpush':case 'lpush':{const l=store.get(k)||[];l.push(r[0]);store.set(k,l);return l.length;}case 'ltrim':{const l=store.get(k)||[];let[a,b]=r.map(Number);if(a<0)a=Math.max(0,l.length+a);if(b<0)b=l.length+b;store.set(k,l.slice(a,b+1));return 'OK';}case 'lrange':return(store.get(k)||[]).slice(0);case 'hset':{const h=store.get(k)||{};h[r[0]]=r[1];store.set(k,h);return 1;}case 'hgetall':{const h=store.get(k);return h?Object.entries(h).flat():[];}default:throw new Error(c);}}
+global.fetch = async (u, o = {}) => { u = String(u);
+  if (u.startsWith('https://fake-redis')) { const p = u.slice(19).split('/').map(decodeURIComponent); return { ok: true, json: async () => ({ result: ex(p) }) }; }
+  if (u === 'https://sheet-hook') { sheetRows.push(JSON.parse(o.body)); return { ok: true, json: async () => ({}) }; }
+  if (u.includes('generativelanguage')) { const b = JSON.parse(o.body); reviewCalls.push(b); if (reviewFail) return { ok: false, status: 500, text: async () => 'x' };
+    return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify({ score: 5, good: 'Polite', loophole: 'Took 12 minutes and never shared the price', betterReply: 'Namaste Ramesh ji! 5 ratti Pukhraj ₹44,500 mein available hai. Photo bhej doon?' }) }] } }] }) }; }
+  if (u.includes('zernio')) { zernio.push(u.split('/api/v1')[1] || u); return { ok: true, json: async () => ({}) }; }
+  throw new Error('unexpected fetch ' + u); };
+const lib = (f) => path.join('/home/claude/live4/lib', f); const stub = (f, e) => { require.cache[require.resolve(lib(f))] = { id: lib(f), filename: lib(f), loaded: true, exports: e }; };
+stub('replyEngine.js', { KNOWLEDGE_BASE: 'KB: free lab certificate; IIGJ 2100; store in Ambala.', generateReply: async () => { customerAiCalls++; return { reply: 'CUSTOMER-REPLY', leadStatus: 'WARM', escalate: false }; } });
+stub('leadLog.js', { logLead: async () => { leadLogCalls++; } });
+stub('escalationNotifier.js', { notifyEscalation: async () => {}, notifyHotLead: async () => {} });
+stub('humanTakeoverGuard.js', { checkHumanTakeover: async () => ({ silence: false }), markAiSent: async () => {} });
+for (const f of ['kundliFlow.js', 'consultationFlow.js', 'sellerInquiryFlow.js']) stub(f, { maybeHandleKundliTurn: async () => null, maybeHandleConsultationPayment: async () => null, maybeHandleSellerInquiry: async () => null });
+stub('productResolver.js', { lookupLiveProduct: async (q) => ({ found: /pukhraj/i.test(q) }), formatLiveProductData: (r) => (r?.found ? 'Yellow Sapphire 5 ratti ₹44,500 https://gemrishi.com/p/1' : '') });
+const wh = require('/home/claude/live4/api/webhook.js');
+const post = (b) => new Promise((res) => { const req = new EventEmitter(); req.method = 'POST'; req.headers = {}; wh(req, { status() { return this; }, json(x) { res(x); } }); setImmediate(() => { req.emit('data', Buffer.from(JSON.stringify(b))); req.emit('end'); }); });
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const team = (id, text, extra = {}) => ({ event: 'message.received', account: { platform: 'whatsapp', phone: '919999900000', accountId: 'acc-team' }, conversation: { id: 'tc1', participantName: 'Ramesh', participantPhone: '919812345678' }, message: { id, text }, ...extra });
+const R = []; const check = (n, f) => { try { f(); R.push('PASS ' + n); } catch (e) { R.push('FAIL ' + n + ' :: ' + e.message); } };
 
 (async () => {
-  // 1. Instagram DM -> WhatsApp -> correct customer
-  await igDm('convA', 'mujhe 5 ratti pukhraj chahiye');
-  await igDm('convA', 'whatsapp pe baat kar sakte hai?');
-  const replyA = lastSentTo('convA').body.message;
-  const tokA = tokenIn(replyA);
-  check('IG DM reply contains wa.me link with token', () => { assert(tokA, replyA); assert(replyA.includes('wa.me/919817975977?text=')); });
-  await waMsg('919812300001', `Hi GemRishi, I'd like to continue here. Ref: ${tokA}`);
-  const aiA = lastAiFor(tokA);
-  check('WhatsApp with token is linked and sees Instagram history', () => {
-    assert(aiA.contextText.includes('CUSTOMER CONTINUITY')); assert(aiA.contextText.includes('pukhraj'));
-  });
-  const grA = store.get('gemrishi:gr:link:instagram:igsid_conva');
-  check('WhatsApp phone linked to same GR id', () => assert.strictEqual(store.get('gemrishi:gr:link:whatsapp:919812300001'), grA));
-  check('Handoff record marked linked', () => assert.strictEqual(JSON.parse(store.get(`gemrishi:gr:handoff:${tokA}`)).status, 'linked'));
+  await post(team('t1', '5 ratti pukhraj ka price kya hai?'));
+  await wait(40);
+  // pretend the customer wrote 12 minutes ago
+  const k = [...store.keys()].find((x) => x.startsWith('gemrishi:conversation:monitor:')); const l = store.get(k); const t = JSON.parse(l[0]); t.timestamp = new Date(Date.now() - 12 * 60000).toISOString(); l[0] = JSON.stringify(t);
+  await post({ ...team('t2', 'ji dekh ke batata hu'), event: 'message.sent', message: { id: 't2', text: 'ji dekh ke batata hu', direction: 'outgoing', sender: { id: 'agent-neel', name: 'Neel Das' } } });
+  await wait(60);
+  const inRow = sheetRows.find((r) => r.direction === 'IN (customer)'); const out = sheetRows.find((r) => r.direction === 'OUT (staff)');
 
-  // 2. Asking for WhatsApp twice (before using it) reuses the same token
-  await igDm('convR', 'whatsapp?');
-  const tokR1 = tokenIn(lastSentTo('convR').body.message);
-  await igDm('convR', 'whatsapp number bhejo');
-  const tokR2 = tokenIn(lastSentTo('convR').body.message);
-  check('Same chat asking twice reuses token', () => assert.strictEqual(tokR2, tokR1));
+  check('Team number: Mannat sends NOTHING on WhatsApp (no message, no typing)', () => assert.strictEqual(zernio.length, 0, JSON.stringify(zernio)));
+  check("Team number: Mannat's customer-reply brain is never used", () => assert.strictEqual(customerAiCalls, 0));
+  check('Team number: nothing written to the customer lead log', () => assert.strictEqual(leadLogCalls, 0));
+  check('Team number: no customer memory / identity data created', () => { const bad = [...store.keys()].filter((x) => !x.startsWith('gemrishi:conversation:monitor:') && !/^gemrishi:webhook:message:/.test(x)); assert.strictEqual(bad.length, 0, bad.join(',')); });
+  check('Incoming customer message logged', () => { assert(inRow); assert.strictEqual(inRow.customerName, 'Ramesh'); assert(/pukhraj/.test(inRow.customerMessage)); });
+  check('Staff reply logged with name, designation, customer message and reply time', () => { assert.strictEqual(out.staffName, 'Neel Das'); assert.strictEqual(out.staffRole, 'Sales Lead'); assert(/pukhraj/.test(out.customerMessage)); assert(out.replyMinutes >= 11.5 && out.replyMinutes <= 12.5, out.replyMinutes); assert.strictEqual(out.staffMatched, 'yes'); });
+  check('Rows carry the private sheet key', () => assert.strictEqual(out.secret, 'k1'));
+  check('Review fields filled: score, good, loophole, better reply', () => { assert.strictEqual(out.score, 5); assert(/price/.test(out.loophole)); assert(/44,500/.test(out.betterReply)); });
+  const rv = reviewCalls[0]; const sys = rv?.systemInstruction?.parts?.[0]?.text || ''; const usr = rv?.contents?.[0]?.parts?.[0]?.text || '';
+  check('Reviewer is SEPARATE: own coach instructions + reads the knowledge base', () => { assert(/private sales-quality coach/.test(sys)); assert(/free lab certificate/.test(sys)); assert(/Sales Lead/.test(sys)); });
+  check('Reviewer gets real prices, reply time, and a clean transcript (no "Mannat" confusion)', () => { assert(/44,500/.test(usr)); assert(/12(\.\d)? minutes/.test(usr), usr); assert(!/Mannat:/.test(usr)); });
 
-  // 3. Five simultaneous customers, zero cross-linking
-  const products = ['5 mukhi rudraksha', 'emerald panna', 'kundli reading', '7 mukhi rudraksha', 'neelam gemstone'];
-  const convs = products.map((_, i) => `sim${i}`);
-  await Promise.all(convs.map((c, i) => igDm(c, `interested in ${products[i]}`)));
-  await Promise.all(convs.map((c) => igDm(c, 'send on whatsapp please')));
-  const toks = convs.map((c) => tokenIn(lastSentTo(c).body.message));
-  check('5 simultaneous customers got 5 distinct tokens', () => assert.strictEqual(new Set(toks).size, 5));
-  const phones = convs.map((_, i) => `91990000000${i}`);
-  await Promise.all(convs.map((c, i) => waMsg(phones[i], `Hi GemRishi, I'd like to continue here. Ref: ${toks[i]}`)));
-  check('5 simultaneous WhatsApp links each reach their OWN customer', () => {
-    convs.forEach((c, i) => {
-      const gr = store.get(`gemrishi:gr:link:instagram:igsid_${c}`);
-      assert.strictEqual(store.get(`gemrishi:gr:link:whatsapp:${phones[i]}`), gr, `customer ${i}`);
-      const ctx = lastAiFor(toks[i]).contextText;
-      assert(ctx.includes(products[i]), `customer ${i} missing own context`);
-      products.forEach((p, j) => { if (j !== i) assert(!ctx.includes(p), `customer ${i} saw customer ${j}'s context`); });
-    });
-    assert.strictEqual(new Set(phones.map((p) => store.get(`gemrishi:gr:link:whatsapp:${p}`))).size, 5);
-  });
+  reviewFail = true; await post({ ...team('t3', 'ok'), event: 'message.sent', message: { id: 't3', text: 'ok', direction: 'outgoing', sender: { id: 'agent-neel' } } }); await wait(60); reviewFail = false;
+  const failRow = sheetRows.filter((r) => r.direction === 'OUT (staff)').pop();
+  check('If the AI review fails: row still logged, no fake customer text', () => { assert(/review failed/.test(failRow.reviewNote)); assert(!/Thanks for reaching out/.test(JSON.stringify(failRow))); assert.strictEqual(zernio.length, 0); });
 
-  // 4. Instagram comment -> WhatsApp
-  await igComment('rahul123', 'price? whatsapp pe details do');
-  const commentReply = [...sent].reverse().find((s) => s.url.includes('/inbox/comments/')).body.message;
-  const tokC = tokenIn(commentReply);
-  check('Comment reply gives code + number (links not clickable in comments)', () => { assert(tokC); assert(commentReply.includes('98179 75977')); });
-  await waMsg('919812300002', `Hello ${tokC}`);
-  check('Comment -> WhatsApp linked to commenter', () => assert.strictEqual(store.get('gemrishi:gr:link:whatsapp:919812300002'), store.get('gemrishi:gr:link:instagram:igu_rahul123')));
+  await post({ ...team('t4', 'who dis'), message: { id: 't4', text: 'bhai kaun', direction: 'outgoing', sender: { id: 'x-unknown', name: 'Rohit' } }, event: 'message.sent' }); await wait(50);
+  check('Unknown sender still logged, flagged for identification', () => { const r = sheetRows.filter((x) => x.direction === 'OUT (staff)').pop(); assert.strictEqual(r.staffName, 'Rohit'); assert(/not in team list/.test(r.staffMatched)); });
 
-  // 5. Direct WhatsApp, new then returning
-  await waMsg('919812300003', 'hi, rudraksha price?');
-  const grNew = store.get('gemrishi:gr:link:whatsapp:919812300003');
-  check('Direct WhatsApp creates a new customer', () => assert(grNew && !Object.values([...store.entries()]).includes(undefined)));
-  await waMsg('919812300003', 'aur 7 mukhi?');
-  check('Returning WhatsApp customer keeps same GR id', () => assert.strictEqual(store.get('gemrishi:gr:link:whatsapp:919812300003'), grNew));
+  // Mannat's own number was listed by mistake -> must STILL reply to customers
+  const z0 = zernio.length, s0 = sheetRows.length;
+  await post({ event: 'message.received', account: { platform: 'whatsapp', phone: '919817975977', accountId: 'acc-mannat' }, conversation: { id: 'mc1', participantPhone: '917777700000' }, message: { id: 'm1', text: 'hello' } }); await wait(250);
+  check("Mannat's own number can never be monitored: customers still get replies", () => { assert(zernio.length > z0, 'no reply sent'); assert.strictEqual(sheetRows.length, s0, 'was logged to monitor sheet'); });
 
-  // 6. Invalid token -> no merge
-  await waMsg('919812300004', 'Ref: WH-ZZZZZZZ');
-  check('Invalid token does not merge', () => {
-    const gr = store.get('gemrishi:gr:link:whatsapp:919812300004');
-    assert(gr && ![...store.keys()].some((k) => k.startsWith('gemrishi:gr:link:instagram') && store.get(k) === gr));
-    assert(lastAiFor('WH-ZZZZZZZ').contextText.includes('could not be matched'));
-  });
+  const z1 = zernio.length, s1 = sheetRows.length;
+  await post({ event: 'message.sent', account: { platform: 'whatsapp', phone: '919817975977', accountId: 'acc-mannat' }, conversation: { id: 'mc1' }, message: { id: 'm2', text: 'CUSTOMER-REPLY', direction: 'outgoing' } }); await wait(80);
+  check("Mannat's own sent messages are ignored (no loop, no logging)", () => { assert.strictEqual(zernio.length, z1); assert.strictEqual(sheetRows.length, s1); });
 
-  // 7. Expired token -> no merge
-  await igDm('convE', 'whatsapp?');
-  const tokE = tokenIn(lastSentTo('convE').body.message);
-  store.delete(`gemrishi:gr:handoff:${tokE}`); // simulate 72h expiry
-  await waMsg('919812300005', `Ref: ${tokE}`);
-  check('Expired token does not merge', () => assert.notStrictEqual(store.get('gemrishi:gr:link:whatsapp:919812300005'), store.get('gemrishi:gr:link:instagram:igsid_conve')));
+  const z2 = zernio.length;
+  await post({ event: 'message.received', account: { platform: 'whatsapp', phone: '918888888888', accountId: 'acc-other' }, conversation: { id: 'cc1', participantPhone: '917777711111' }, message: { id: 'c1', text: 'hi' } }); await wait(250);
+  check('Other customer numbers: normal Mannat replies, unchanged', () => assert(zernio.length > z2));
 
-  // 8. Someone else re-using a token -> rejected
-  await waMsg('919812399999', `Ref: ${tokA}`);
-  check('Used token cannot be claimed by another number', () => assert.notStrictEqual(store.get('gemrishi:gr:link:whatsapp:919812399999'), grA));
+  process.env.ENABLE_TEAM_MONITOR = 'false'; const s2 = sheetRows.length;
+  await post(team('t9', 'hi again')); await wait(250);
+  check('Monitor switched OFF: nothing written to monitor sheet', () => assert.strictEqual(sheetRows.length, s2));
 
-  // 9. Number already linked to another customer presenting a token -> conflict, not re-pointed
-  await igDm('convF', 'whatsapp');
-  const tokF = tokenIn(lastSentTo('convF').body.message);
-  await waMsg('919812300003', `Ref: ${tokF}`); // this number belongs to grNew
-  check('Conflicting link is not silently merged', () => assert.strictEqual(store.get('gemrishi:gr:link:whatsapp:919812300003'), grNew));
-
-  // 10. Facebook Messenger -> no AI reply
-  const before = sent.length;
-  await post({ event: 'message.received', account: { platform: 'facebook', accountId: 'fb' }, conversation: { id: 'fbconv' }, message: { id: 'fbm1', text: 'hello whatsapp' } });
-  const after = sent.length;
-  check('Facebook Messenger gets no reply', () => assert.strictEqual(after, before));
-
-  // 11. Duplicate webhook -> one response
-  const onlyMsgs = () => sent.filter((x) => x.url.endsWith('/messages')).length;
-  const b2 = onlyMsgs();
-  await waMsg('919812300006', 'hello', 'dup-1'); await waMsg('919812300006', 'hello', 'dup-1');
-  const a2 = onlyMsgs();
-  check('Duplicate webhook answered once', () => assert.strictEqual(a2, b2 + 1));
-
-  // 13. ANIL'S REAL CONVERSATION (2026-09-29): facts must survive the handoff
-  await igDm('anil', 'can we talk on whatsapp');
-  await igDm('anil', 'hi my name is Rahul');
-  await igDm('anil', 'i am from Hisar');
-  await igDm('anil', 'i want yellow sapphire around 5 ratti for career growth');
-  await igDm('anil', 'my budget is 50000');
-  await igDm('anil', 'can we continue on whatsapp');
-  const tokAnil = tokenIn(lastSentTo('anil').body.message);
-  await waMsg('918726559209', `Hi GemRishi, I'd like to continue here. Ref: ${tokAnil}`);
-  await waMsg('918726559209', 'whats my name');
-  const ctxName = lastAiFor('whats my name').contextText;
-  check('Anil: WhatsApp knows name, city, product, budget, purpose', () => {
-    for (const x of ['Name: Rahul', 'City: Hisar', 'Yellow Sapphire', 'Budget: 50000', 'Purpose: career growth']) assert(ctxName.includes(x), 'missing ' + x);
-  });
-  check('Anil: full Instagram chat carried over (incl. message 2)', () => assert(ctxName.includes('my name is Rahul')));
-  // 25 more messages on Instagram - the original "my name is Rahul" message
-  // falls out of the 12-message window, but the saved facts must remain.
-  for (let i = 0; i < 25; i++) await igDm('anil', `question number ${i}`);
-  await igDm('anil', 'remind me what i wanted');
-  const ctxLate = lastAiFor('remind me what i wanted').contextText;
-  check('Anil: facts survive 25+ messages later (old message gone, facts kept)', () => {
-    assert(!ctxLate.includes('my name is Rahul'), 'old message should have aged out');
-    assert(ctxLate.includes('Name: Rahul') && ctxLate.includes('Budget: 50000') && ctxLate.includes('City: Hisar'));
-  });
-  await igDm('anil', 'back on instagram, any update?');
-  check('Anil: facts also shown back on Instagram', () => assert(lastAiFor('back on instagram').contextText.includes('Name: Rahul')));
-
-  // 14. GOOGLE REVIEWS
-  process.env.ENABLE_REVIEW_REPLIES = 'true';
-  const review = (id, rating, text, extra = {}) => post({ id: 'evt-' + id, event: 'review.new', account: { accountId: 'gbp-acc', platform: 'googlebusiness' },
-    review: { id: `accounts/1/locations/2/reviews/${id}`, platform: 'googlebusiness', rating, text, reviewer: { name: 'Priya Sharma' }, createdAt: new Date().toISOString(), hasReply: false, ...extra } });
-  const reviewSends = () => sent.filter((x) => x.url.includes('/inbox/reviews/'));
-  const r0 = reviewSends().length;
-  await review('r5', 5, 'Beautiful Pukhraj, great service!');
-  const r5 = reviewSends().slice(-1)[0]; const rAfter5 = reviewSends().length;
-  check('5-star review: reply posted automatically, signed Team GemRishi, correct endpoint', () => {
-    assert.strictEqual(rAfter5, r0 + 1);
-    assert(r5.url.includes(encodeURIComponent('accounts/1/locations/2/reviews/r5')), r5.url);
-    assert.strictEqual(r5.body.accountId, 'gbp-acc'); assert(/Team GemRishi$/.test(r5.body.message));
-  });
-  const a0 = alerts.length; const r1 = reviewSends().length;
-  await review('r2', 2, 'Delivery was late and nobody replied');
-  const rAfter2 = reviewSends().length; const aAfter2 = alerts.length; const lastReason = alerts[alerts.length - 1]?.reason || '';
-  check('2-star review: reply posted automatically AND team gets an FYI alert', () => {
-    assert.strictEqual(rAfter2, r1 + 1);
-    assert.strictEqual(aAfter2, a0 + 1); assert(/FYI: 2★/.test(lastReason) && /already replied publicly/.test(lastReason));
-  });
-  const a5 = alerts.length; await review('r5b', 5, 'Lovely');
-  const a5after = alerts.length;
-  check('5-star review: no alert needed', () => assert.strictEqual(a5after, a5));
-  await review('r5', 5, 'Beautiful Pukhraj, great service!'); // Zernio redelivers the same event
-  await post({ id: 'evt-r5-again', event: 'review.new', account: { accountId: 'gbp-acc' }, review: { id: 'accounts/1/locations/2/reviews/r5', rating: 5, text: 'x', reviewer: { name: 'P' }, hasReply: false } });
-  check('Same review delivered twice: replied once', () => assert.strictEqual(reviewSends().filter((x) => x.url.includes(encodeURIComponent('reviews/r5') + '/reply')).length, 1));
-  const r2 = reviewSends().length;
-  await review('r6', 5, 'Great', { hasReply: true });
-  await post({ id: 'evt-upd', event: 'review.updated', account: { accountId: 'gbp-acc' }, review: { id: 'accounts/1/locations/2/reviews/r7', rating: 5, text: 'edited', reviewer: { name: 'A' }, hasReply: false } });
-  process.env.ENABLE_REVIEW_REPLIES = 'false';
-  const l0 = leads.length;
-  await review('r8', 5, 'Nice');
-  const r3 = reviewSends().length; const l1 = leads.length; const lastReply = leads[leads.length - 1].reply;
-  check('Already-replied, review.updated, and switch-off: nothing posted (switch-off still logged)', () => {
-    assert.strictEqual(r3, r2);
-    assert.strictEqual(l1, l0 + 1); assert(/switched off/.test(lastReply));
-  });
-
-  // 15. HUMAN-LIKE TYPING
-  const s0 = sent.length; const m0 = aiMarked.length;
-  await waMsg('919812377777', 'MULTI please');
-  const waBubbles = sent.slice(s0);
-  const msgs = waBubbles.filter((x) => x.url.endsWith('/messages'));
-  const typings = waBubbles.filter((x) => x.url.endsWith('/typing'));
-  const marks = aiMarked.slice(m0);
-  check('WhatsApp reply sent as 3 separate bubbles with typing indicator before each', () => {
-    assert.deepStrictEqual(msgs.map((x) => x.body.message), ['Hi Rahul! Great choice.', 'We have Pukhraj around 5 ratti in stock.', 'Loose stone or in a ring?']);
-    assert.strictEqual(typings.length, 3);
-    assert.strictEqual(new Set(msgs.map((x) => x.headers?.['Idempotency-Key'] || '')).size, 3);
-  });
-  check('Each bubble registered as Mannat\'s BEFORE it is sent (human-takeover safety)', () => {
-    for (const b of ['Hi Rahul! Great choice.', 'We have Pukhraj around 5 ratti in stock.', 'Loose stone or in a ring?']) {
-      const mk = marks.find((x) => x.t === b); assert(mk, 'not marked: ' + b);
-      const sendIdx = waBubbles.findIndex((x) => x.body.message === b);
-      assert(mk.sentBefore <= s0 + sendIdx, 'marked after sending: ' + b);
-    }
-  });
-  const c0 = sent.length;
-  await igComment('multiuser', 'MULTI comment');
-  const cSends = sent.slice(c0).filter((x) => x.url.includes('/inbox/comments/'));
-  check('Public comment stays ONE message (no bubbles)', () => assert.strictEqual(cSends.length, 1));
-  process.env.HUMAN_TYPING = 'false';
-  const o0 = sent.length; await waMsg('919812377778', 'MULTI off');
-  const offMsgs = sent.slice(o0).filter((x) => x.url.endsWith('/messages')).length;
-  process.env.HUMAN_TYPING = '';
-  check('HUMAN_TYPING=false: back to one message', () => assert.strictEqual(offMsgs, 1));
-
-  // 16. QUICK MESSAGES ANSWERED TOGETHER
-  const q0 = aiCalls.length; const qs0 = sent.filter((x) => x.url.endsWith('/messages')).length;
-  await Promise.all([
-    waMsg('919812388888', 'hi'),
-    new Promise((r) => setTimeout(r, 10)).then(() => waMsg('919812388888', 'pukhraj chahiye')),
-    new Promise((r) => setTimeout(r, 25)).then(() => waMsg('919812388888', 'price kya hai')),
-  ]);
-  const burstCalls = aiCalls.slice(q0);
-  const burstSends = sent.filter((x) => x.url.endsWith('/messages')).length - qs0;
-  check('3 quick messages -> Mannat reads all 3 and replies ONCE', () => {
-    assert.strictEqual(burstCalls.length, 1, 'AI called ' + burstCalls.length + ' times');
-    for (const t of ['hi', 'pukhraj chahiye', 'price kya hai']) assert(burstCalls[0].message.includes(t), 'missing ' + t);
-    assert.strictEqual(burstSends, 1);
-  });
-  // two customers bursting at the same time stay separate
-  const p0 = aiCalls.length;
-  await Promise.all([waMsg('919812300101', 'A1 emerald'), waMsg('919812300202', 'B1 ruby'), waMsg('919812300101', 'A2 price'), waMsg('919812300202', 'B2 size')]);
-  const pc = aiCalls.slice(p0);
-  check('Two customers bursting at once: one reply each, never mixed', () => {
-    assert.strictEqual(pc.length, 2);
-    const a = pc.find((c) => c.message.includes('A1')); const b = pc.find((c) => c.message.includes('B1'));
-    assert(a && a.message.includes('A2') && !a.message.includes('B')); assert(b && b.message.includes('B2') && !b.message.includes('A'));
-  });
-  // a message sent after the wait gets its own reply
-  const l2 = aiCalls.length;
-  await waMsg('919812388888', 'thanks');
-  const l3 = aiCalls.length;
-  check('A later message (after the wait) gets its own normal reply', () => assert.strictEqual(l3, l2 + 1));
-
-  // 17. ONE-TIME WHATSAPP INVITATION
-  const INV = /would it be okay to continue on WhatsApp|WhatsApp par baat continue karein/;
-  const lastMsgsTo = (conv, since) => sent.slice(since).filter((x) => x.url.includes(encodeURIComponent(conv)) && x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
-  let k = sent.length; await igDm('inv1', 'hello');
-  const firstReply = lastMsgsTo('inv1', k);
-  k = sent.length; await igDm('inv1', 'emerald price?');
-  const secondReply = lastMsgsTo('inv1', k);
-  check('Invite: never in the first reply; asked once interest is shown', () => { assert(!INV.test(firstReply)); assert(INV.test(secondReply), secondReply); });
-  const ai0 = aiCalls.length; k = sent.length; await igDm('inv1', 'haan');
-  const yesReply = lastMsgsTo('inv1', k); const aiAfterYes = aiCalls.length;
-  check('Invite: customer says "haan" -> personal WhatsApp link, no AI guesswork', () => { assert(/wa\.me\/919817975977/.test(yesReply) && /WH-/.test(yesReply), yesReply); assert.strictEqual(aiAfterYes, ai0); });
-  k = sent.length; await igDm('inv1', 'emerald 5 ratti price again?');
-  const afterAccept = lastMsgsTo('inv1', k);
-  check('Invite: never asked again after yes', () => assert(!INV.test(afterAccept)));
-
-  await igDm('inv2', 'hi'); await igDm('inv2', 'pukhraj price');
-  k = sent.length; await igDm('inv2', 'nahi yahin theek hai');
-  const noCtx = lastAiFor('nahi yahin').contextText; const noReply = lastMsgsTo('inv2', k);
-  k = sent.length; for (const q of ['emerald price', 'pukhraj price 5 ratti', 'ok']) await igDm('inv2', q);
-  const laterNo = lastMsgsTo('inv2', k);
-  check('Invite: customer says no -> respected, AI told, never asked again', () => {
-    assert(/prefers to continue chatting here/.test(noCtx)); assert(!/wa\.me/.test(noReply)); assert(!INV.test(laterNo));
-  });
-
-  await igDm('inv3', 'hi'); await igDm('inv3', 'emerald price');
-  k = sent.length; await igDm('inv3', 'what is the origin?'); await igDm('inv3', 'pukhraj price'); await igDm('inv3', 'price of ruby');
-  const ignored = lastMsgsTo('inv3', k);
-  check('Invite: customer ignores it -> normal chat, never asked again', () => { assert(!INV.test(ignored)); assert(!/wa\.me/.test(ignored)); });
-
-  k = sent.length; await waMsg('919812399990', 'hi'); await waMsg('919812399990', 'emerald price');
-  const waSide = sent.slice(k).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
-  k = sent.length; await igDm('anil', 'emerald price please');
-  const anilSide = lastMsgsTo('anil', k);
-  check('Invite: never on WhatsApp itself, never to customers already linked to WhatsApp', () => { assert(!INV.test(waSide)); assert(!INV.test(anilSide)); });
-
-  const cm0 = sent.length; await igComment('commenter9', 'emerald price?');
-  const cm1 = sent.slice(cm0).find((x) => x.url.includes('/inbox/comments/'))?.body.message || '';
-  const cm2i = sent.length; await igComment('commenter9', 'pukhraj price?');
-  const cm2 = sent.slice(cm2i).find((x) => x.url.includes('/inbox/comments/'))?.body.message || '';
-  check('Comment: one soft WhatsApp line with the number, only once per person', () => { assert(/98179 75977/.test(cm1), cm1); assert(!/98179 75977/.test(cm2)); });
-
-  // 18. NEVER ASK FOR THE NUMBER ON WHATSAPP
-  let w0 = sent.length;
-  await waMsg('919812366666', 'my order is damaged, I want a refund');
-  const escReply = sent.slice(w0).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
-  const escCtx = lastAiFor('order is damaged').contextText;
-  const flowMem = flowCalls[flowCalls.length - 1]?.existingMemory || '';
-  check('WhatsApp escalation: never asks for contact number (asks name only)', () => {
-    assert(!/contact number|phone/i.test(escReply), escReply);
-    assert(/share your name/i.test(escReply), escReply);
-  });
-  check('WhatsApp: AI told the number is known; Kundli/payment flows get it pre-filled', () => {
-    assert(/Never ask for their number/.test(escCtx)); assert(/Phone: \+919812366666/.test(escCtx));
-    assert(/My contact number is \+919812366666/.test(flowMem), flowMem);
-  });
-  await waMsg('919812366666', 'my name is Sunita');
-  w0 = sent.length; await waMsg('919812366666', 'still no refund, very bad');
-  const esc2 = sent.slice(w0).filter((x) => x.url.endsWith('/messages')).map((x) => x.body.message).join('\n');
-  check('WhatsApp: once name is known too, no details asked at all', () => { assert(!/share your (name|contact)|contact number/i.test(esc2), esc2); });
-  // Instagram customer who gave their number earlier (Anil gave none; use new one)
-  await igDm('igp', 'hi'); 
-  await post({ event: 'message.received', account: { platform: 'instagram', accountId: 'acc-ig' }, conversation: { id: 'igp', participantUsername: 'igp_user', participantId: 'igsid_igp' }, message: { id: 'm-igp-ph', text: 'my name is Kavita, number 9876543210' } });
-  await igDm('igp', 'which stone is good for me?');
-  const igFlow = flowCalls[flowCalls.length - 1]?.existingMemory || '';
-  const igCtx = lastAiFor('which stone is good').contextText;
-  check('Instagram: name and number given earlier are known in later messages (no re-asking)', () => {
-    assert(/My name is Kavita/.test(igFlow) && /My contact number is 9876543210/.test(igFlow), igFlow);
-    assert(/Name: Kavita/.test(igCtx) && /Phone: 9876543210/.test(igCtx));
-  });
-
-  // 12. Switch OFF -> behaviour exactly as before
-  process.env.ENABLE_IDENTITY_BRIDGE = 'false';
-  await igDm('convOff', 'whatsapp pe baat karo');
-  check('Switch off: no link added, no GR record', () => {
-    assert(!/wa\.me/.test(lastSentTo('convOff').body.message));
-    assert(!store.has('gemrishi:gr:link:instagram:igsid_convoff'));
-  });
-
-  let pass = 0;
-  for (const [name, fn] of results) {
-    try { fn(); pass++; console.log('PASS', name); } catch (e) { console.log('FAIL', name, '\n   ', e.message); }
-  }
-  console.log(`\n${pass}/${results.length} passed`);
-  console.log('\nSample IG reply:\n' + replyA);
-  console.log('\nSample comment reply:\n' + commentReply);
-  process.exit(pass === results.length ? 0 : 1);
+  console.log(R.join('\n')); console.log(`\n${R.filter((r) => r.startsWith('PASS')).length}/${R.length} passed`); process.exit(R.every((r) => r.startsWith('PASS')) ? 0 : 1);
 })();
