@@ -21,7 +21,7 @@ const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowle
 const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
-const { prepareInbound, addHandoffCta, saveCustomerFacts, identityNotes } = require('../lib/crossChannel');
+const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
 const { handleReview } = require('../lib/reviewHandler');
 const { sendLikeHuman } = require('../lib/humanTyping');
 const { collectBurst } = require('../lib/messageBatcher');
@@ -412,6 +412,12 @@ async function handleComment(event) {
     intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
   });
   result = { ...result, reply: cta.reply };
+  const invite = await maybeAppendInvite({
+    identity, reply: result.reply, intent: aiContext.intent.intent, leadStatus: result.leadStatus,
+    existingMemory, isComment: true, fromGeneralReply: true, escalated: Boolean(result.escalate),
+    hadCta: Boolean(cta.handoffId), hindi: looksHinglishOrHindi(commentText) || looksHinglishOrHindi(existingMemory),
+  });
+  result = { ...result, reply: invite.reply };
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
@@ -583,7 +589,18 @@ async function handleMessage(event) {
   // someone offering to SELL to GemRishi must never be mis-read as a
   // customer asking about buying/consultation. Live by default (Ravi,
   // 2026-09-24), same on/off convention as the consultation flow below.
-  let result = await maybeHandleSellerInquiry({
+  // Added 2026-09-29 (Ravi): is this the customer's answer to Mannat's
+  // one-time "shall we continue on WhatsApp?" question?
+  const dmHindi = looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory);
+  const inviteAnswer = await handleInviteAnswer({
+    identity, messageText, existingMemory, memoryScope: 'conversation', memoryId,
+    conversationId, platformUserId: conversation.participantId || senderHandle, hindi: dmHindi,
+  });
+  if (inviteAnswer?.contextNote) aiContext.contextText += `\n\n${inviteAnswer.contextNote}`;
+  let fromGeneralReply = false;
+
+  let result = inviteAnswer?.result || null;
+  if (!result) result = await maybeHandleSellerInquiry({
     enabled: process.env.ENABLE_SELLER_INQUIRY_FLOW !== 'false',
     type: messageType,
     memoryId,
@@ -621,6 +638,7 @@ async function handleMessage(event) {
   }
   if (!result) {
     result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+    fromGeneralReply = true;
   }
   result = mergeEscalation(result, messageText, false);
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
@@ -631,6 +649,12 @@ async function handleMessage(event) {
     intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '', customerName: result.customerName || '',
   });
   result = { ...result, reply: cta.reply };
+  const invite = await maybeAppendInvite({
+    identity, reply: result.reply, intent: aiContext.intent.intent, leadStatus: result.leadStatus,
+    existingMemory, fromGeneralReply, escalated: Boolean(result.escalate),
+    hadCta: Boolean(cta.handoffId || inviteAnswer?.handoffId), hindi: dmHindi,
+  });
+  result = { ...result, reply: invite.reply };
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
@@ -675,7 +699,7 @@ async function handleMessage(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
