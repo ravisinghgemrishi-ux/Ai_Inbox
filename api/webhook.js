@@ -236,8 +236,13 @@ function appendWorkingHoursNote(reply, message, existingMemory, result) {
   if (!reply) return reply;
   const isHindi = looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory);
   const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
-  if (!result?.customerName || !result?.customerPhone) {
+  // Only ask for what's actually missing (on WhatsApp the number is known).
+  if (!result?.customerName && !result?.customerPhone) {
     parts.push(isHindi ? ASK_NAME_PHONE_NOTE_HI : ASK_NAME_PHONE_NOTE_EN);
+  } else if (!result?.customerName) {
+    parts.push(isHindi ? 'Agar aap apna naam share kar dein toh team aapse aasani se connect kar payegi.' : 'If you could share your name, the team can reach you easily.');
+  } else if (!result?.customerPhone) {
+    parts.push(isHindi ? 'Agar aap apna contact number share kar dein toh team aapse jaldi contact kar payegi.' : 'If you could share your contact number, the team can reach you quickly.');
   }
   parts.push(isHindi ? CONTACT_SHARE_NOTE_HI : CONTACT_SHARE_NOTE_EN);
   const note = parts.join(' ');
@@ -580,7 +585,7 @@ async function handleMessage(event) {
   const ownMemory = await loadContext('conversation', memoryId);
   // For a WhatsApp customer who arrived via a handoff link, their earlier
   // Instagram chat is placed before this chat's own history.
-  const existingMemory = [identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
+  const existingMemory = [identity?.contactMemoryText, identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
   const aiContext = await buildAIContext(messageText, platform, existingMemory);
   if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
 
@@ -641,6 +646,12 @@ async function handleMessage(event) {
     fromGeneralReply = true;
   }
   result = mergeEscalation(result, messageText, false);
+  // Already-known name/phone (e.g. the WhatsApp number itself) count as given.
+  result = {
+    ...result,
+    customerName: result.customerName || identity?.knownName || '',
+    customerPhone: result.customerPhone || identity?.knownPhone || '',
+  };
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
   const cta = await addHandoffCta({
     identity, reply: result.reply, messageText, existingMemory, memoryScope: 'conversation', memoryId,
