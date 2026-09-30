@@ -400,7 +400,36 @@ function readRawBody(req) {
   });
 }
 
+// Added 2026-09-30 (Ravi): WhatsApp account discovery + safety lock.
+// Zernio identifies business numbers only by an internal account id, so we
+// log each WhatsApp account we see (once per 6h) to learn which id is which
+// number. MANNAT_WHATSAPP_ACCOUNT_IDS (comma-separated) then locks Mannat's
+// WhatsApp auto-replies to her OWN account(s): any other WhatsApp account
+// (e.g. staff numbers) is never auto-replied to. Unset = old behaviour.
+async function logAccountSeen(event) {
+  const a = event?.account || {};
+  if (String(a.platform || '').toLowerCase() !== 'whatsapp') return;
+  const id = String(a.accountId || a.id || a._id || '');
+  if (!id) return;
+  try {
+    const r = await redisCommand(`/set/${encodeURIComponent(`gemrishi:account-seen:${id}`)}/1/EX/21600/NX`);
+    if (r?.result !== 'OK') return;
+  } catch { /* logging only */ }
+  const safe = {};
+  for (const [k, v] of Object.entries(a)) if (typeof v !== 'object') safe[k] = v;
+  console.log(`[account-seen] ${JSON.stringify({ event: event?.event, ...safe })}`);
+}
+
+function mannatWhatsAppAllowed(event) {
+  const list = String(process.env.MANNAT_WHATSAPP_ACCOUNT_IDS || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!list.length) return true;
+  const a = event?.account || {};
+  if (String(a.platform || '').toLowerCase() !== 'whatsapp') return true;
+  return list.includes(String(a.accountId || a.id || a._id || ''));
+}
+
 async function handleEvent(event) {
+  if (event?.event === 'message.received' || event?.event === 'message.sent') await logAccountSeen(event);
   if (event?.event === 'comment.received') return handleComment(event);
   // Added 2026-09-30 (Ravi): team WhatsApp monitoring. A message (incoming OR
   // the staff's own outgoing reply) on a monitored business number is watched
@@ -415,7 +444,13 @@ async function handleEvent(event) {
       if (event?.event === 'message.sent') return; // outgoing staff replies never go to the customer path
     }
   }
-  if (event?.event === 'message.received') return handleMessage(event);
+  if (event?.event === 'message.received') {
+    if (!mannatWhatsAppAllowed(event)) {
+      console.log('[webhook] WhatsApp account is not Mannat\'s - not auto-replying:', event?.account?.accountId || event?.account?.id);
+      return;
+    }
+    return handleMessage(event);
+  }
   // Added 2026-09-29 (Ravi): Google Business Profile reviews. review.updated
   // (an edit, or our own reply being added) is deliberately ignored.
   if (event?.event === 'review.new') {
