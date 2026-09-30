@@ -23,7 +23,7 @@ const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
 const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
 const { handleReview } = require('../lib/reviewHandler');
-const { handleTeamMessage } = require('../lib/teamMonitor');
+const { handleTeamMessage, handleAccountEvent } = require('../lib/teamMonitor');
 const { getMemory: monitorGetMemory, addTurn: monitorAddTurn } = require('../lib/memoryStore');
 const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
@@ -430,6 +430,12 @@ function mannatWhatsAppAllowed(event) {
 
 async function handleEvent(event) {
   if (event?.event === 'message.received' || event?.event === 'message.sent') await logAccountSeen(event);
+  // Added 2026-09-30 (Ravi): alert if a team / Mannat WhatsApp number is
+  // disconnected from Zernio (monitoring would silently stop otherwise).
+  if (event?.event === 'account.disconnected' || event?.event === 'account.connected') {
+    try { await handleAccountEvent(event); } catch (err) { console.error('[webhook] account event error:', err.message); }
+    return;
+  }
   if (event?.event === 'comment.received') return handleComment(event);
   // Added 2026-09-30 (Ravi): team WhatsApp monitoring. A message (incoming OR
   // the staff's own outgoing reply) on a monitored business number is watched
