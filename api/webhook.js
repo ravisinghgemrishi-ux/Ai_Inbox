@@ -143,6 +143,65 @@ async function claimContentSlot(scopeId, text) {
   }
 }
 
+// Added 2026-09-30 (Ravi): LOOP GUARD. Mannat got stuck in an endless
+// bot-to-bot loop with the RBI's official WhatsApp channel (its welcome
+// message re-fired after every reply of hers, ~250 replies in 45 min). These
+// guards stop Mannat talking to any automated sender, whatever the platform:
+//  1. BLOCKED_SENDERS env (comma-separated numbers/handles) - never replied to.
+//  2. Same text from the same chat more than 3x in 6h -> stop replying.
+//  3. More than 30 messages from one chat in 10 min -> pause that chat 1h.
+// Each guard logs ONE sheet row when it trips, then stays silent.
+const LOOP_SAME_TEXT_LIMIT = Number(process.env.LOOP_SAME_TEXT_LIMIT || 3);
+const LOOP_SAME_TEXT_WINDOW_S = 6 * 3600;
+const LOOP_FLOOD_LIMIT = Number(process.env.LOOP_FLOOD_LIMIT || 30);
+const LOOP_FLOOD_WINDOW_S = 10 * 60;
+const LOOP_PAUSE_S = 3600;
+
+function isBlockedSender(...ids) {
+  const list = String(process.env.BLOCKED_SENDERS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!list.length) return false;
+  for (const raw of ids) {
+    const v = String(raw || '').trim().toLowerCase();
+    if (!v) continue;
+    const digits = v.replace(/\D/g, '');
+    if (list.includes(v) || (digits.length >= 8 && list.some((b) => b.replace(/\D/g, '') === digits))) return true;
+  }
+  return false;
+}
+
+async function redisIncrWithTtl(key, ttl) {
+  const data = await redisCommand(`/incr/${encodeURIComponent(key)}`);
+  const n = Number(data?.result || 0);
+  if (n === 1) await redisCommand(`/expire/${encodeURIComponent(key)}/${ttl}`);
+  return n;
+}
+
+// Returns { stop: false } or { stop: true, firstTrip: bool, reason }.
+async function checkLoopGuard(scopeId, text) {
+  try {
+    const pauseKey = `gemrishi:loop-pause:${scopeId}`;
+    const paused = await redisCommand(`/get/${encodeURIComponent(pauseKey)}`);
+    if (paused?.result) return { stop: true, firstTrip: false, reason: paused.result };
+
+    const hash = crypto.createHash('sha256').update(normalizeForContentDedup(text)).digest('hex').slice(0, 24);
+    const sameCount = await redisIncrWithTtl(`gemrishi:loop-text:${scopeId}:${hash}`, LOOP_SAME_TEXT_WINDOW_S);
+    const floodCount = await redisIncrWithTtl(`gemrishi:loop-flood:${scopeId}`, LOOP_FLOOD_WINDOW_S);
+
+    let reason = '';
+    if (sameCount > LOOP_SAME_TEXT_LIMIT) reason = `same message repeated ${sameCount}x (likely a bot)`;
+    else if (floodCount > LOOP_FLOOD_LIMIT) reason = `${floodCount} messages in 10 min (likely a bot)`;
+    if (!reason) return { stop: false };
+
+    // Same-text trips stay silent for that text; floods pause the whole chat.
+    const ttl = sameCount > LOOP_SAME_TEXT_LIMIT ? LOOP_SAME_TEXT_WINDOW_S : LOOP_PAUSE_S;
+    const set = await redisCommand(`/set/${encodeURIComponent(pauseKey)}/${encodeURIComponent(reason)}/EX/${ttl}/NX`);
+    return { stop: true, firstTrip: set?.result === 'OK', reason };
+  } catch (err) {
+    console.error('[webhook] loop guard unavailable; continuing:', err.message);
+    return { stop: false };
+  }
+}
+
 async function loadContext(scope, id) {
   try { return formatMemory(await getMemory(scope, id)); }
   catch (err) { console.error('[webhook] memory read failed:', err.message); return ''; }
@@ -494,6 +553,25 @@ async function handleMessage(event) {
   let messageText = message.text || message.message || '';
   const senderHandle = conversation.participantUsername || conversation.participantName || message.contactId || 'unknown';
   if (!messageText || !conversationId) return;
+
+  // LOOP GUARD (2026-09-30) - runs before anything else can reply.
+  if (isBlockedSender(conversation.participantPhone, conversation.participantId, conversation.participantUsername, message.contactId, senderHandle)) {
+    console.log('[webhook] blocked sender ignored:', senderHandle);
+    return;
+  }
+  const loop = await checkLoopGuard(`${platform || 'social'}:${conversationId}`, messageText);
+  if (loop.stop) {
+    console.log('[webhook] loop guard - not replying:', conversationId, loop.reason);
+    if (loop.firstTrip) {
+      await logLead({
+        platform, contact: senderHandle, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', message: messageText,
+        reply: `(Mannat stopped replying - ${loop.reason}. Check this chat; add the number to BLOCKED_SENDERS if it is a bot.)`,
+        leadStatus: 'NOT_A_LEAD', productInterest: '', escalated: false,
+        notes: 'loop_guard_stopped',
+      });
+    }
+    return;
+  }
 
   const replyKey = `message:${messageId || crypto.createHash('sha256').update(`${conversationId}|${messageText}`).digest('hex')}`;
   let slot = { allowed: true, reason: 'redis_unavailable' };
