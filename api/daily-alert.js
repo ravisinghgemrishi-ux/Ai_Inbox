@@ -88,7 +88,21 @@ function sheetCopy(leads, date) {
   return [header, ...rows].join('\n');
 }
 
+// 2026-10-04 (Ravi): the "contacted" check relies on the Team Monitor. While
+// monitoring is paused (ENABLE_TEAM_MONITOR not 'true') every lead would look
+// "not contacted", so the alert pauses too and resumes on its own when the
+// monitor is switched back on. DAILY_ALERT=off also pauses it by hand.
+// Waiting one-time handoffs are still sent either way.
+function alertActive() {
+  if (String(process.env.DAILY_ALERT || 'on').toLowerCase() === 'off') return false;
+  return process.env.ENABLE_TEAM_MONITOR === 'true';
+}
+
 async function run({ date, dry }) {
+  if (!alertActive()) {
+    const flushed = dry ? 0 : await handoff.flushDue({ max: 50 });
+    return { date, paused: 'staff monitoring is off, so the uncontacted-leads alert is paused', handoffsFlushed: flushed, sent: {} };
+  }
   const leads = await formLead.leadsForDay(date);
   const pending = [];
   for (const l of leads) {
