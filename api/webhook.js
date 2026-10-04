@@ -28,6 +28,11 @@ const { getMemory: monitorGetMemory, addTurn: monitorAddTurn } = require('../lib
 const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
 const { collectBurst } = require('../lib/messageBatcher');
+// Added 2026-10-04 (Ravi, quality batch): reply guards, one-time handoff,
+// Meta form leads.
+const guards = require('../lib/conversationGuards');
+const handoff = require('../lib/handoff');
+const formLead = require('../lib/formLead');
 
 // Added 2026-09-29 (Ravi): Zernio was delivering every message twice - it
 // gives up waiting after ~15s, and Mannat takes longer than that to write a
@@ -296,6 +301,9 @@ const CONTACT_SHARE_NOTE_HI = `Aap humein seedha ${GEMRISHI_CONTACT_NUMBER} par 
 
 function appendWorkingHoursNote(reply, message, existingMemory, result) {
   if (!reply) return reply;
+  // 2026-10-04 (audit): this long note was appended to EVERY escalated reply,
+  // so the same paragraph repeated down the chat. Now once per conversation.
+  if (/10 AM - 8 PM|10 AM se 8 PM/.test(String(existingMemory || ''))) return reply;
   const isHindi = looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory);
   const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
   // Only ask for what's actually missing (on WhatsApp the number is known).
@@ -312,44 +320,74 @@ function appendWorkingHoursNote(reply, message, existingMemory, result) {
   return `${reply}\n\n${note}`;
 }
 
-async function sendEscalationAlert(result, details) {
-  if (!result?.escalate) return;
+// Replaced 2026-10-04 (Ravi, FIX 6 + FIX 15): instead of an email/Telegram
+// every time a message escalated or looked HOT (the same customer pinged the
+// team many times a day), the chat is queued for ONE handoff to the right
+// person - sales -> Mannat Chawla, escalations/B2B -> Neel - sent once the
+// customer has stopped typing (see lib/handoff.js).
+async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, intent = '', trigger = '', extra = {} }) {
   try {
-    await notifyEscalation({
-      ...details,
-      reason: result.escalateReason,
-      leadStatus: result.leadStatus,
-      productInterest: result.productInterest,
-      category: result.category || '',
-      customerName: result.customerName || '',
-      customerPhone: result.customerPhone || extractFallbackPhone(details.message),
-      customerCity: result.customerCity || '',
+    const route = extra.route || handoff.routeFor({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
+    const q = await handoff.queueForward({
+      route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
+      customerName: result?.customerName || identity?.knownName || '',
+      customerPhone: result?.customerPhone || identity?.knownPhone || '',
+      customerCity: result?.customerCity || '',
+      customerBudget: result?.customerBudget || '',
+      productInterest: result?.productInterest || '',
+      reason: result?.escalate ? result?.escalateReason || '' : '',
+      trigger,
+      ...extra,
     });
+    if (q.queued) scheduleFlush();
+    return q;
   } catch (err) {
-    console.error('[escalation] alert failed; lead remains logged:', err.message);
+    console.error('[handoff] queue failed; lead remains logged:', err.message);
+    return { queued: false };
   }
 }
 
-// Added 2026-09-24 (Ravi): a HOT lead that never escalates (see
-// knowledgeBase.js's ESCALATION_RULES - a plain price/product question is
-// never itself a reason to escalate) previously relied entirely on someone
-// checking the lead sheet to ever follow up. This closes that gap with a
-// lighter, separate "worth a follow-up" alert on the same channels -
-// deliberately skipped when result.escalate is true so a real escalation
-// never double-alerts (sendEscalationAlert above already covers that case).
-async function sendHotLeadAlert(result, details) {
-  if (result?.escalate) return;
-  if (result?.leadStatus !== 'HOT') return;
-  try {
-    await notifyHotLead({
-      ...details,
-      leadStatus: result.leadStatus,
-      productInterest: result.productInterest,
-      customerName: result.customerName || '',
-      customerPhone: result.customerPhone || extractFallbackPhone(details.message),
-    });
-  } catch (err) {
-    console.error('[hot-lead] alert failed; lead remains logged:', err.message);
+// SAFETY NET (2026-10-04, Ravi): if anything in the reply pipeline breaks,
+// the customer still gets a short, honest reply instead of silence, and the
+// lead sheet shows it ("safety_net_reply") so misses are visible.
+function safetyNetResult(message, err) {
+  const hindi = looksHinglishOrHindi(message);
+  return {
+    reply: hindi
+      ? 'Message karne ke liye dhanyavaad! Humari team aapko jaldi reply karegi.'
+      : 'Thanks for your message! Our team will get back to you shortly.',
+    leadStatus: 'WARM', productInterest: '', escalate: true,
+    escalateReason: `safety net - reply pipeline error: ${err?.message || 'unknown'}`,
+    safetyNet: true,
+  };
+}
+
+// Decide whether this turn should hand the customer to a person.
+function handoffTrigger({ result, identity, inviteAnswer, cta, isComment }) {
+  const phone = result?.customerPhone || identity?.knownPhone || '';
+  if (result?.escalate) return 'needs a person (escalation)';
+  if (inviteAnswer?.forward === 'whatsapp_yes') return 'customer said YES to connecting on WhatsApp';
+  if (cta?.wantsWhatsApp) return 'customer asked to talk on WhatsApp';
+  if (phone && inviteAnswer?.forward === 'whatsapp_no') return 'customer prefers to stay on Instagram - call/message them on the number given';
+  if (phone && inviteAnswer?.forward === 'whatsapp_no_answer') return 'serious buyer, number given';
+  if (!isComment && phone && result?.leadStatus === 'HOT') return 'HOT lead, number given';
+  return '';
+}
+
+// Runs a background task without holding up the reply (Vercel keeps the
+// function alive for it). Used for the delayed handoff flush.
+function runInBackground(promise) {
+  const p = Promise.resolve(promise).catch((err) => console.error('[webhook] background task failed:', err.message));
+  if (waitUntil) { try { waitUntil(p); } catch { /* not in a request context */ } }
+  return p;
+}
+
+function scheduleFlush() {
+  const waitMs = (handoff.settleSeconds() + 5) * 1000;
+  // Only wait inside the function if that fits comfortably; otherwise the
+  // next webhook event / the 7 PM job flushes it.
+  if (waitMs <= Number(process.env.HANDOFF_INLINE_WAIT_MAX_MS || 250000)) {
+    runInBackground(sleep(waitMs).then(() => handoff.flushDue()));
   }
 }
 
@@ -428,7 +466,17 @@ function mannatWhatsAppAllowed(event) {
   return list.includes(String(a.accountId || a.id || a._id || ''));
 }
 
+// Interim (2026-10-04, Ravi FIX 14): Mannat has no WhatsApp line of her own
+// right now, so she never auto-replies on WhatsApp. Set
+// MANNAT_WHATSAPP_REPLIES=on once her new business number is connected
+// (and list it in MANNAT_WHATSAPP_ACCOUNT_IDS / MANNAT_REPLY_NUMBERS).
+function mannatWhatsAppRepliesOn() {
+  return String(process.env.MANNAT_WHATSAPP_REPLIES || 'off').toLowerCase() === 'on';
+}
+
 async function handleEvent(event) {
+  // Any due one-time handoffs go out now (cheap check, runs in background).
+  runInBackground(handoff.flushDue());
   if (event?.event === 'message.received' || event?.event === 'message.sent') await logAccountSeen(event);
   // Added 2026-09-30 (Ravi): alert if a team / Mannat WhatsApp number is
   // disconnected from Zernio (monitoring would silently stop otherwise).
@@ -451,6 +499,11 @@ async function handleEvent(event) {
     }
   }
   if (event?.event === 'message.received') {
+    const p = String(event?.account?.platform || event?.conversation?.platform || '').toLowerCase();
+    if (p.includes('whatsapp') && !mannatWhatsAppRepliesOn()) {
+      console.log('[webhook] WhatsApp auto-replies are off (Mannat is Instagram-only for now) - not replying');
+      return;
+    }
     if (!mannatWhatsAppAllowed(event)) {
       console.log('[webhook] WhatsApp account is not Mannat\'s - not auto-replying:', event?.account?.accountId || event?.account?.id);
       return;
@@ -497,6 +550,24 @@ async function handleComment(event) {
 
   const memoryId = `${platform || 'social'}:${authorHandle}:${postId || 'unknown'}`;
 
+  // FIX 11 (2026-10-04): a seller gets the certified-only brush-off with
+  // Neel's number - and NOTHING is logged, saved or alerted.
+  const sellerTurn = await maybeHandleSellerInquiry({
+    enabled: process.env.ENABLE_SELLER_INQUIRY_FLOW !== 'false',
+    scopeId: `${platform || 'social'}:${authorHandle}`, message: commentText, intent: classifyIntent(commentText),
+  });
+  if (sellerTurn) {
+    if (sellerTurn.reply && postId && accountId) {
+      try {
+        await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: sellerTurn.reply });
+        await markReplySent(replyKey);
+      } catch (err) { console.error('[webhook] seller reply failed:', err.message); await releaseReplySlot(replyKey); }
+    } else {
+      await releaseReplySlot(replyKey);
+    }
+    return;
+  }
+
   // Second, content-based dedup layer (independent of the message-ID gate
   // above): catches the case where the same customer text arrives twice
   // under genuinely different IDs (a resend), which the ID-based gate above
@@ -519,12 +590,25 @@ async function handleComment(event) {
     console.error('[webhook] content-dedup check failed; continuing with comment reply:', err.message);
   }
 
-  const existingMemory = await loadContext('comment', memoryId);
-  const identity = await prepareInbound({ platform, event, messageText: commentText, platformUserId: comment.author?.id, handle: authorHandle });
-  const aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
-  if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
-  let result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+  let existingMemory = '';
+  let identity = null;
+  let aiContext = { contextText: '', liveProductData: '', intent: classifyIntent(commentText), product: '', live: { found: false } };
+  let result;
+  try {
+    existingMemory = await loadContext('comment', memoryId);
+    identity = await prepareInbound({ platform, event, messageText: commentText, platformUserId: comment.author?.id, handle: authorHandle });
+    aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
+    if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
+    aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: commentText, knownPhone: identity?.knownPhone || '' })}`;
+    result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData, intent: aiContext.intent.intent });
+  } catch (err) {
+    // SAFETY NET (2026-10-04): never leave a customer unanswered because
+    // something broke (sheet 401, Gemini credits, a timeout...).
+    console.error('[webhook] comment pipeline failed - sending safety-net reply:', err.message);
+    result = safetyNetResult(commentText, err);
+  }
   result = mergeEscalation(result, commentText, false);
+  result = { ...result, reply: guards.cleanReply({ reply: result.reply, memory: existingMemory, message: commentText, knownPhone: result.customerPhone || identity?.knownPhone || '', isFirstReply: !existingMemory }) };
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result) };
   const cta = await addHandoffCta({
     identity, reply: result.reply, messageText: commentText, existingMemory, memoryScope: 'comment', memoryId,
@@ -535,6 +619,7 @@ async function handleComment(event) {
   result = { ...result, reply: cta.reply };
   const invite = await maybeAppendInvite({
     identity, reply: result.reply, intent: aiContext.intent.intent, leadStatus: result.leadStatus,
+    knownName: result.customerName || identity?.knownName || '', knownPhone: result.customerPhone || identity?.knownPhone || '',
     existingMemory, isComment: true, fromGeneralReply: true, escalated: Boolean(result.escalate),
     hadCta: Boolean(cta.handoffId), hindi: looksHinglishOrHindi(commentText) || looksHinglishOrHindi(existingMemory),
   });
@@ -567,18 +652,14 @@ async function handleComment(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
-  await sendEscalationAlert(result, {
-    platform, contact: authorHandle, type: 'comment', message: commentText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
-  });
-  await sendHotLeadAlert(result, {
-    platform, contact: authorHandle, type: 'comment', message: commentText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
-  });
+  const commentTrigger = handoffTrigger({ result, identity, inviteAnswer: null, cta, isComment: true });
+  if (commentTrigger) {
+    await queueHandoff({ result, identity, platform, contact: authorHandle, memoryScope: 'comment', memoryId, intent: aiContext.intent.intent, trigger: commentTrigger });
+  }
 }
 
 async function handleMessage(event) {
@@ -713,16 +794,69 @@ async function handleMessage(event) {
     return;
   }
 
-  const identity = await prepareInbound({
-    platform, event, messageText, conversationId,
-    platformUserId: conversation.participantId || `conv_${conversationId}`, handle: senderHandle,
+  // FIX 11 (2026-10-04, Ravi): sellers get the certified-only brush-off with
+  // Neel's number, BEFORE any customer profile, memory or lead row exists.
+  // Nothing about them is logged, saved or alerted.
+  const sellerTurn = await maybeHandleSellerInquiry({
+    enabled: process.env.ENABLE_SELLER_INQUIRY_FLOW !== 'false',
+    scopeId: memoryId, message: messageText, intent: classifyIntent(messageText),
   });
-  const ownMemory = await loadContext('conversation', memoryId);
-  // For a WhatsApp customer who arrived via a handoff link, their earlier
-  // Instagram chat is placed before this chat's own history.
-  const existingMemory = [identity?.contactMemoryText, identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
-  const aiContext = await buildAIContext(messageText, platform, existingMemory);
-  if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
+  if (sellerTurn) {
+    if (sellerTurn.reply && accountId) {
+      try {
+        await sendLikeHuman({
+          reply: sellerTurn.reply,
+          typing: () => sendTypingIndicator({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId }),
+          beforeSend: (text) => markAiSent(memoryId, text),
+          send: (text) => sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text }),
+        });
+        await markReplySent(replyKey);
+      } catch (err) { console.error('[webhook] seller reply failed:', err.message); await releaseReplySlot(replyKey); }
+    } else {
+      await releaseReplySlot(replyKey);
+    }
+    return;
+  }
+
+  let identity = null;
+  let ownMemory = '';
+  let existingMemory = '';
+  let aiContext = { contextText: '', liveProductData: '', intent: classifyIntent(messageText), product: '', live: { found: false } };
+  let pipelineError = null;
+  // FIX 8 (2026-10-04): Meta ad form leads.
+  const isNewFormLead = formLead.isFormLead(messageText);
+  let formRef = null;
+  let parsedForm = null;
+  try {
+    identity = await prepareInbound({
+      platform, event, messageText, conversationId,
+      platformUserId: conversation.participantId || `conv_${conversationId}`, handle: senderHandle,
+    });
+    ownMemory = await loadContext('conversation', memoryId);
+    // For a WhatsApp customer who arrived via a handoff link, their earlier
+    // Instagram chat is placed before this chat's own history.
+    existingMemory = [identity?.contactMemoryText, identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
+    // A pending handoff for this customer waits until they finish typing.
+    await handoff.touchPending({ grId: identity?.grId || '', platform, contact: senderHandle });
+    aiContext = await buildAIContext(messageText, platform, existingMemory);
+    if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
+    if (isNewFormLead) {
+      parsedForm = formLead.parseFormLead(messageText);
+      await formLead.recordFormLead({ lead: parsedForm, platform, contact: senderHandle, memoryId });
+      formRef = { new: true };
+      aiContext.contextText += `\n\n${formLead.firstReplyNote(parsedForm, looksHinglishOrHindi(messageText))}`;
+    } else {
+      formRef = await formLead.formLeadForConversation(memoryId);
+      if (formRef) {
+        aiContext.contextText += `\n\n${formLead.FOLLOWUP_NOTE}`;
+        if (formLead.looksLikePreference(messageText)) await formLead.savePreference(formRef, messageText);
+      }
+    }
+    aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: messageText, knownPhone: identity?.knownPhone || parsedForm?.phone || '' })}`;
+  } catch (err) {
+    pipelineError = err;
+    console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
+  }
 
   // Seller/manufacturer inquiry flow (see lib/sellerInquiryFlow.js) - checked
   // FIRST, before the customer-facing Kundli/consultation flows, since
@@ -732,7 +866,7 @@ async function handleMessage(event) {
   // Added 2026-09-29 (Ravi): is this the customer's answer to Mannat's
   // one-time "shall we continue on WhatsApp?" question?
   const dmHindi = looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory);
-  const inviteAnswer = await handleInviteAnswer({
+  const inviteAnswer = (formRef || pipelineError) ? null : await handleInviteAnswer({
     identity, messageText, existingMemory, memoryScope: 'conversation', memoryId,
     conversationId, platformUserId: conversation.participantId || senderHandle, hindi: dmHindi,
   });
@@ -740,19 +874,14 @@ async function handleMessage(event) {
   let fromGeneralReply = false;
 
   let result = inviteAnswer?.result || null;
-  if (!result) result = await maybeHandleSellerInquiry({
-    enabled: process.env.ENABLE_SELLER_INQUIRY_FLOW !== 'false',
-    type: messageType,
-    memoryId,
-    message: messageText,
-    intent: aiContext.intent,
-    existingMemory,
-  });
+  const skipFlows = Boolean(formRef) || Boolean(pipelineError);
+  try {
+  if (pipelineError) throw pipelineError;
   // Mannat 2.0: an isolated, additive branch (see lib/kundliFlow.js) that
   // only ever engages when ENABLE_KUNDLI_FLOW=true. It returns null when
   // not applicable, and the normal replyEngine path below runs unchanged -
   // this line is the ENTIRE footprint of that feature on the live flow.
-  if (!result) {
+  if (!result && !skipFlows) {
     result = await maybeHandleKundliTurn({
       enabled: process.env.ENABLE_KUNDLI_FLOW === 'true',
       type: messageType,
@@ -766,7 +895,7 @@ async function handleMessage(event) {
   // default, independent of the Kundli flow above. Only engages when the
   // customer names a specific paid plan; otherwise it returns null and the
   // normal replyEngine path below runs unchanged.
-  if (!result) {
+  if (!result && !skipFlows) {
     result = await maybeHandleConsultationPayment({
       enabled: process.env.ENABLE_CONSULTATION_PAYMENT_FLOW !== 'false',
       type: messageType,
@@ -777,18 +906,31 @@ async function handleMessage(event) {
     });
   }
   if (!result) {
-    result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData });
+    result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData, intent: aiContext.intent.intent, forceSmart: Boolean(formRef) });
     fromGeneralReply = true;
+  }
+  } catch (err) {
+    // SAFETY NET (2026-10-04): never silence because something broke.
+    console.error('[webhook] DM pipeline failed - sending safety-net reply:', err.message);
+    result = safetyNetResult(messageText, err);
+    fromGeneralReply = false;
   }
   result = mergeEscalation(result, messageText, false);
   // Already-known name/phone (e.g. the WhatsApp number itself) count as given.
   result = {
     ...result,
-    customerName: result.customerName || identity?.knownName || '',
-    customerPhone: result.customerPhone || identity?.knownPhone || '',
+    customerName: result.customerName || identity?.knownName || parsedForm?.name || '',
+    customerPhone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || '',
+    customerCity: result.customerCity || parsedForm?.city || '',
+    customerBudget: result.customerBudget || parsedForm?.budget || '',
   };
+  // FIX 1 + FIX 3 backstop: no repeated category question, no repeated
+  // phone ask, "- Mannat" only on the first reply.
+  if (!inviteAnswer?.result) {
+    result = { ...result, reply: guards.cleanReply({ reply: result.reply, memory: existingMemory, message: messageText, knownPhone: result.customerPhone, isFirstReply: !ownMemory }) };
+  }
   if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
-  const cta = await addHandoffCta({
+  const cta = formRef ? { reply: result.reply, handoffId: '' } : await addHandoffCta({
     identity, reply: result.reply, messageText, existingMemory, memoryScope: 'conversation', memoryId,
     conversationId, platformUserId: conversation.participantId || senderHandle, isComment: false,
     hindi: looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory),
@@ -798,7 +940,9 @@ async function handleMessage(event) {
   const invite = await maybeAppendInvite({
     identity, reply: result.reply, intent: aiContext.intent.intent, leadStatus: result.leadStatus,
     existingMemory, fromGeneralReply, escalated: Boolean(result.escalate),
-    hadCta: Boolean(cta.handoffId || inviteAnswer?.handoffId), hindi: dmHindi,
+    hadCta: Boolean(cta.handoffId || inviteAnswer?.handoffId || cta.wantsWhatsApp), hindi: dmHindi,
+    knownName: result.customerName || '', knownPhone: result.customerPhone || '',
+    blocked: Boolean(formRef) || aiContext.intent.intent === 'b2b_inquiry',
   });
   result = { ...result, reply: invite.reply };
   await saveCustomerFacts(identity, result, aiContext.product || '');
@@ -845,18 +989,23 @@ async function handleMessage(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
-  await sendEscalationAlert(result, {
-    platform, contact: senderHandle, type: messageType, message: messageText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
-  });
-  await sendHotLeadAlert(result, {
-    platform, contact: senderHandle, type: messageType, message: messageText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
-  });
+  // FIX 6 / 8 / 15: one handoff per customer, to the right person.
+  let trigger = handoffTrigger({ result, identity, inviteAnswer, cta, isComment: false });
+  const extra = {};
+  if (formRef) {
+    trigger = trigger || (formRef.new ? 'Meta ad form lead - gemologist to call today' : '');
+    extra.route = 'sales';
+    if (parsedForm) extra.productInterest = [parsedForm.requirement, parsedForm.purpose].filter(Boolean).join(' / ');
+    if (!formRef.new && formLead.looksLikePreference(messageText)) extra.preference = messageText.slice(0, 200);
+  }
+  if (aiContext.intent.intent === 'b2b_inquiry') { extra.route = 'neel'; trigger = trigger || 'B2B / wholesale enquiry'; }
+  if (trigger) {
+    await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, intent: aiContext.intent.intent, trigger, extra });
+  }
 }
 
 function inboundSafeId(event) {
