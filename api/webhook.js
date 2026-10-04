@@ -33,6 +33,7 @@ const { collectBurst } = require('../lib/messageBatcher');
 const guards = require('../lib/conversationGuards');
 const handoff = require('../lib/handoff');
 const formLead = require('../lib/formLead');
+const { recordInstagramLead } = require('../lib/instagramLeads');
 
 // Added 2026-09-29 (Ravi): Zernio was delivering every message twice - it
 // gives up waiting after ~15s, and Mannat takes longer than that to write a
@@ -992,6 +993,17 @@ async function handleMessage(event) {
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
+
+  // 2026-10-04 (Ravi): organic Instagram customers who gave their number ->
+  // "Instagram Leads (Mannat)" tab in the Gemstone Meta Leads sheet.
+  if (!sendError) {
+    await recordInstagramLead({
+      platform, type: messageType, handle: senderHandle, customerId: identity?.grId || '',
+      name: result.customerName, phone: result.customerPhone, city: result.customerCity,
+      budget: result.customerBudget, interest: result.productInterest, leadStatus: result.leadStatus,
+      isFormLead: Boolean(formRef),
+    });
+  }
 
   // FIX 6 / 8 / 15: one handoff per customer, to the right person.
   let trigger = handoffTrigger({ result, identity, inviteAnswer, cta, isComment: false });
