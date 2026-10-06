@@ -99,6 +99,10 @@ function alertActive() {
 }
 
 async function run({ date, dry }) {
+  // MANNAT_STANDBY=on (2026-10-05): everything paused, including handoffs.
+  if (String(process.env.MANNAT_STANDBY || '').trim().toLowerCase() === 'on') {
+    return { date, paused: 'Mannat is on standby', handoffsFlushed: 0, sent: {} };
+  }
   if (!alertActive()) {
     const flushed = dry ? 0 : await handoff.flushDue({ max: 50 });
     return { date, paused: 'staff monitoring is off, so the uncontacted-leads alert is paused', handoffsFlushed: flushed, sent: {} };
