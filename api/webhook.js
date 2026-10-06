@@ -392,6 +392,10 @@ function scheduleFlush() {
   }
 }
 
+function isStandby() {
+  return String(process.env.MANNAT_STANDBY || '').trim().toLowerCase() === 'on';
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   let rawBody;
@@ -404,6 +408,17 @@ module.exports = async (req, res) => {
 
   let body;
   try { body = JSON.parse(rawBody); } catch { return res.status(400).json({ error: 'Invalid JSON' }); }
+
+  // STANDBY (2026-10-05, Ravi): MANNAT_STANDBY=on puts Mannat fully on hold -
+  // no replies (DMs, comments, any platform), no alerts, no handoffs, no sheet
+  // writes. Events are acknowledged (so Zernio doesn't retry or disable the
+  // webhook) and dropped; customers' messages stay in the normal Instagram /
+  // Facebook inboxes for the team. Messages that arrive during standby are NOT
+  // answered later when standby is switched off.
+  if (isStandby()) {
+    console.log('[webhook] standby: event acknowledged, no action taken');
+    return res.status(200).json({ received: true, standby: true });
+  }
 
   const inboundKey = stableInboundKey(body, rawBody);
   try {
