@@ -229,6 +229,16 @@ async function saveTurn(scope, id, role, text) {
 // by saveTurn) for the number and surfaces that plainly.
 const WHATSAPP_NUMBER_PATTERN = /98179\s*75978|98179\s*75972/;
 
+// FIX (2026-10-07, Ravi): cheap, deterministic Indian-mobile scan for the
+// human-takeover "silence" path below - deliberately NOT the AI-based
+// extractContact() in lib/consultationFlow.js, to keep the "a silenced
+// conversation costs nothing extra beyond the one Zernio read" promise.
+const INDIA_MOBILE_PATTERN = /(?:\+?91[\s-]?)?([6-9]\d{9})\b/;
+function extractPhoneFromText(text) {
+  const m = String(text || '').match(INDIA_MOBILE_PATTERN);
+  return m ? `+91${m[1]}` : '';
+}
+
 // FIX (2026-10-07, Ravi): the product lookup used to read ONLY the latest
 // message. Real case (shevangisingh26septt): after asking about Sri Lankan
 // Neelam, the follow-ups "Price?", "Show me all" and "50k" named no stone, so
@@ -847,6 +857,22 @@ async function handleMessage(event) {
       leadStatus: 'WARM', productInterest: '', escalated: false,
       notes: takeover.justDetectedHuman ? 'human_takeover_detected' : 'human_takeover_silence_continuing',
     });
+    // FIX (2026-10-07, Ravi): a customer can share their WhatsApp number
+    // WHILE a staff member has already taken over (AI only monitoring) -
+    // two real same-day cases (jatin.tyagi24, ilujain89) never reached the
+    // Instagram Organic sheet because this branch returned before
+    // recordInstagramLead() further down ever ran. No AI call added here
+    // (see extractPhoneFromText above) so the "costs nothing extra" promise
+    // for a silenced conversation still holds.
+    if (platform === 'instagram' && messageType === 'dm') {
+      const phone = extractPhoneFromText(messageText);
+      if (phone) {
+        await recordInstagramLead({
+          platform, type: messageType, handle: senderHandle, phone,
+          leadStatus: 'WARM', isFormLead: formLead.isFormLead(messageText),
+        }).catch((err) => console.error('[webhook] recordInstagramLead (human-takeover path) failed:', err.message));
+      }
+    }
     await releaseReplySlot(replyKey);
     return;
   }
