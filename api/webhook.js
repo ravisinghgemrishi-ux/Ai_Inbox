@@ -33,6 +33,7 @@ const { collectBurst } = require('../lib/messageBatcher');
 const guards = require('../lib/conversationGuards');
 const handoff = require('../lib/handoff');
 const formLead = require('../lib/formLead');
+const callWindow = require('../lib/callWindow');
 const { recordInstagramLead } = require('../lib/instagramLeads');
 
 // Added 2026-09-29 (Ravi): Zernio was delivering every message twice - it
@@ -654,6 +655,8 @@ async function handleComment(event) {
     aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
     if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
     aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: commentText, knownPhone: identity?.knownPhone || '' })}`;
+    const commentCallNote = callWindow.immediateCallNote(commentText, looksHinglishOrHindi(commentText));
+    if (commentCallNote) aiContext.contextText += `\n\n${commentCallNote}`;
     result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData, intent: aiContext.intent.intent });
   } catch (err) {
     // SAFETY NET (2026-10-04): never leave a customer unanswered because
@@ -902,11 +905,16 @@ async function handleMessage(event) {
     } else {
       formRef = await formLead.formLeadForConversation(memoryId);
       if (formRef) {
-        aiContext.contextText += `\n\n${formLead.FOLLOWUP_NOTE}`;
+        aiContext.contextText += `\n\n${formLead.followupNote(looksHinglishOrHindi(messageText))}`;
         if (formLead.looksLikePreference(messageText)) await formLead.savePreference(formRef, messageText);
       }
     }
     aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: messageText, knownPhone: identity?.knownPhone || parsedForm?.phone || '' })}`;
+    // FIX 6 (2026-10-07, Ravi): "call now" must never be answered with a
+    // false "team is calling you right now" - and must respect office hours
+    // (after 7 PM -> tomorrow after 10 AM; before 10 AM -> today after 10 AM).
+    const immediateCallNote = callWindow.immediateCallNote(messageText, looksHinglishOrHindi(messageText));
+    if (immediateCallNote) aiContext.contextText += `\n\n${immediateCallNote}`;
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
