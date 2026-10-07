@@ -11,7 +11,7 @@ const { generateReply } = require('../lib/replyEngine');
 const { logLead } = require('../lib/leadLog');
 const { classifyIntent, extractProduct } = require('../lib/intentRouter');
 const { getMemory, addTurn, formatMemory } = require('../lib/memoryStore');
-const { lookupLiveProduct, formatLiveProductData } = require('../lib/productResolver');
+const { lookupLiveProduct, formatLiveProductData, _internal: productInternals } = require('../lib/productResolver');
 const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation, notifyHotLead } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
@@ -228,10 +228,45 @@ async function saveTurn(scope, id, role, text) {
 // by saveTurn) for the number and surfaces that plainly.
 const WHATSAPP_NUMBER_PATTERN = /98179\s*75978|98179\s*75972/;
 
+// FIX (2026-10-07, Ravi): the product lookup used to read ONLY the latest
+// message. Real case (shevangisingh26septt): after asking about Sri Lankan
+// Neelam, the follow-ups "Price?", "Show me all" and "50k" named no stone, so
+// Mannat found nothing (or matched random pendants) and kept saying she would
+// "check with the team". If the latest message names no stone/Rudraksha, the
+// lookup now also uses the stone (and size) from the most recent message in
+// the chat that named one.
+function productQueryWithContext(messageText, product, existingMemory) {
+  const base = product || messageText;
+  // Never let this helper break a reply: if anything is off, search as before.
+  try { return addStoneFromChat(base, messageText, existingMemory); }
+  catch (err) { console.error('[webhook] product context lookup skipped:', err.message); return base; }
+}
+
+function addStoneFromChat(base, messageText, existingMemory) {
+  if (typeof productInternals?.parseQuery !== 'function') return base;
+  const pq = productInternals.parseQuery(messageText);
+  if (pq.stones.length || pq.wantsRudraksha || !existingMemory) return base;
+  const lines = String(existingMemory).split(/\n+/).reverse();
+  let ratti = pq.ratti; let carat = pq.carat;
+  for (const line of lines) {
+    const lq = productInternals.parseQuery(line);
+    if (!ratti && lq.ratti) ratti = lq.ratti;
+    if (!carat && lq.carat) carat = lq.carat;
+    if (!lq.stones.length && !lq.wantsRudraksha) continue;
+    const bits = [lq.stones.join(' ')];
+    if (lq.wantsRudraksha && lq.mukhi) bits.push(`${lq.mukhi} mukhi rudraksha`);
+    else if (lq.wantsRudraksha) bits.push('rudraksha');
+    if (!pq.ratti && ratti) bits.push(`${ratti} ratti`);
+    if (!pq.carat && carat) bits.push(`${carat} carat`);
+    return `${bits.filter(Boolean).join(' ')} ${base}`.trim();
+  }
+  return base;
+}
+
 async function buildAIContext(messageText, platform, existingMemory, postCaption = '') {
   const intent = classifyIntent(messageText);
   const product = extractProduct(messageText);
-  const live = await lookupLiveProduct(product || messageText);
+  const live = await lookupLiveProduct(productQueryWithContext(messageText, product, existingMemory));
   const parts = [
     `INTENT: ${intent.intent} (confidence ${intent.confidence})`,
     product ? `PRODUCT: ${product}` : 'PRODUCT: not explicitly identified',
@@ -372,6 +407,9 @@ function handoffTrigger({ result, identity, inviteAnswer, cta, isComment }) {
   if (phone && inviteAnswer?.forward === 'whatsapp_no') return 'customer prefers to stay on Instagram - call/message them on the number given';
   if (phone && inviteAnswer?.forward === 'whatsapp_no_answer') return 'serious buyer, number given';
   if (!isComment && phone && result?.leadStatus === 'HOT') return 'HOT lead, number given';
+  // FIX (2026-10-07): Mannat promised a team follow-up (photos, price check,
+  // call) - make sure the team actually hears about it.
+  if (!isComment && handoff.promisesTeamFollowUp(result?.reply)) return 'Mannat told the customer the team will follow up - please reply to them on Instagram';
   return '';
 }
 
@@ -1050,3 +1088,7 @@ function isFacebookDmPlatform(platform) {
   const normalized = String(platform || '').trim().toLowerCase();
   return ['facebook', 'fb', 'messenger', 'facebook_messenger', 'fb_messenger', 'facebookmessenger'].includes(normalized);
 }
+
+// test hooks (2026-10-07)
+module.exports._productQueryWithContext = productQueryWithContext;
+module.exports._handoffTrigger = handoffTrigger;
