@@ -1077,7 +1077,7 @@ async function handleMessage(event) {
     reply: sendError ? '(send failed, see notes)' : result.reply,
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), parsedForm?.altPhone ? `form_gave_two_numbers(also:${parsedForm.altPhone})` : '', result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 

@@ -74,6 +74,7 @@ function leadLine(l, i) {
   const want = [l.requirement, l.purpose].filter(Boolean).join(' / ');
   return [
     `${i + 1}. ${l.name || 'Name not given'} - ${l.phone || 'no number'}`,
+    l.altPhone ? `   (form also gave: ${l.altPhone} - check both before calling)` : '',
     `   Recorded at ${formLead.istTime(l.recordedAt)} IST, still not contacted`,
     `   ${[want && `Wants: ${want}`, l.budget && `Budget: ${l.budget}`, l.city && `City: ${l.city}`].filter(Boolean).join(' | ')}`,
     l.preference ? `   Preference: ${l.preference}` : '',
@@ -82,9 +83,9 @@ function leadLine(l, i) {
 }
 
 function sheetCopy(leads, date) {
-  const header = 'Date,Recorded (IST),Name,Number,Wants,Budget,City,Preference,Instagram';
+  const header = 'Date,Recorded (IST),Name,Number,Also Gave,Wants,Budget,City,Preference,Instagram';
   const esc = (v) => `"${String(v || '').replace(/"/g, '""')}"`;
-  const rows = leads.map((l) => [date, formLead.istTime(l.recordedAt), l.name, l.phone, [l.requirement, l.purpose].filter(Boolean).join(' / '), l.budget, l.city, l.preference, l.contact].map(esc).join(','));
+  const rows = leads.map((l) => [date, formLead.istTime(l.recordedAt), l.name, l.phone, l.altPhone, [l.requirement, l.purpose].filter(Boolean).join(' / '), l.budget, l.city, l.preference, l.contact].map(esc).join(','));
   return [header, ...rows].join('\n');
 }
 
