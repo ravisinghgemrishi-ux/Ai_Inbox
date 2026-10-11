@@ -56,6 +56,7 @@ function fakeGeminiResponse(requestBody) {
 
 // ---- Fake fetch: routes by URL ----
 let forceFinderFailure = false;
+let forceGeocodeMiss = false;
 global.fetch = async (url, opts = {}) => {
   const u = String(url);
   if (u.startsWith('https://fake-redis.example')) {
@@ -67,6 +68,11 @@ global.fetch = async (url, opts = {}) => {
     return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }] }) };
   }
   if (u.includes('/api/finder')) {
+    if (forceGeocodeMiss) {
+      // Mirrors the real astrology engine's actual 404 shape (see Vercel
+      // logs: "/api/geocode returned 404 - Birth place not found").
+      return { ok: false, status: 404, json: async () => ({ success: false, error: '/api/geocode returned 404 - Birth place not found' }) };
+    }
     if (forceFinderFailure) {
       return { ok: false, status: 500, json: async () => ({ success: false, error: 'Finder processing failed' }) };
     }
@@ -108,6 +114,14 @@ async function run() {
 
   // 5. Feed slots one at a time (each a separate inbound message/turn).
   const turns = ['Test Customer', '15-08-1995', '10:30', 'Ambala', 'wealth', '9876543210'];
+  // turns ends with an OPTIONAL slot (phone), fed AFTER the chart already
+  // generates on the "wealth" (purpose) turn. Scenarios that inspect `result`
+  // immediately after the feed-slots loop (11, 11b) need the loop to stop
+  // right after the chart-triggering turn, otherwise that trailing phone
+  // turn gets processed as a separate, later interaction (post chart-gen,
+  // or after a place slot was cleared) and `result` ends up reflecting that
+  // unrelated turn instead of the one being tested.
+  const turnsNoPhone = turns.slice(0, -1);
   for (const turn of turns) {
     result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: turn, intent: { intent: 'consultation' } });
     assert.ok(result, `turn "${turn}" should produce a result`);
@@ -170,14 +184,41 @@ async function run() {
   // what was collected, never leave the customer with silence.
   const memoryId4 = 'test:conversation:4';
   forceFinderFailure = true;
-  for (const turn of ['astrology guidance please', ...turns]) {
+  for (const turn of ['astrology guidance please', ...turnsNoPhone]) {
     result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId4, message: turn, intent: { intent: 'consultation' } });
   }
   assert.strictEqual(result.escalate, true, 'engine failure must escalate');
-  assert.strictEqual(result.escalateReason, 'kundli_engine_unavailable');
+  assert.strictEqual(result.escalateReason, 'kundli_engine_unavailable (engine_error)');
   assert.ok(result.reply && result.reply.length > 0, 'must still send the customer a reply on failure');
   forceFinderFailure = false;
   console.log('OK: astrology engine failure escalates gracefully with a reply ->', result.escalateReason);
+
+  // 11b. Astrology engine geocode miss (place not found) - must NOT escalate
+  // as an outage. Must re-ask for place and let the customer retry, reusing
+  // the normal missing-slot flow (added 2026-10-11 after a false-alarm
+  // Telegram "engine unavailable" alert turned out to be a geocode 404 on
+  // one customer's typed place).
+  const memoryId4b = 'test:conversation:4b';
+  forceGeocodeMiss = true;
+  for (const turn of ['astrology guidance please', ...turnsNoPhone]) {
+    result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId4b, message: turn, intent: { intent: 'consultation' } });
+  }
+  assert.strictEqual(result.escalate, false, 'a geocode miss must not escalate as an engine outage');
+  assert.strictEqual(result.escalateReason, '');
+  assert.ok(/Ambala/.test(result.reply) && /location|place/i.test(result.reply), `must re-ask for a clearer place, got: ${result.reply}`);
+  // Giving a clearer place should resolve the flow (finder succeeds once forceGeocodeMiss is off).
+  forceGeocodeMiss = false;
+  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId4b, message: 'Ambala, Haryana, India', intent: { intent: 'consultation' } });
+  assert.strictEqual(result.escalate, false, 'retry with a clearer place must succeed, not escalate');
+  // Note: this test's Gemini mock always returns the literal 'MOCKED_REPLY'
+  // for stage-reply calls, so we can't assert on the actual chart-ready
+  // template text here (it's only used as a fallback when the mocked reply
+  // is empty) - assert on the state that proves the flow actually recovered
+  // and reached choosing_category instead.
+  assert.ok(result.reply && result.reply.length > 0, 'must still send the customer a reply after recovering');
+  assert.strictEqual(result.productInterest, 'Kundli Consultation', 'should be in choosing_category right after a successful chart generation');
+  assert.strictEqual(result.leadStatus, 'HOT');
+  console.log('OK: geocode miss re-asks for place instead of escalating, then recovers ->', result.reply.slice(0, 60));
 
   // 12. "Not sure" branch: when the customer doesn't know gemstone vs
   // Rudraksha, ask for budget, then give guidance (never forcing a choice
