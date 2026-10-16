@@ -18,7 +18,7 @@ const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
-const { checkHumanTakeover, markAiSent } = require('../lib/humanTakeoverGuard');
+const { checkHumanTakeover, markAiSent, recordOutgoingMessage, isHumanActive } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
 const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
@@ -563,6 +563,14 @@ async function handleEvent(event) {
       if (event?.event === 'message.sent') return; // outgoing staff replies never go to the customer path
     }
   }
+  // FIX 2026-10-16 (Ravi): an outgoing DM that Mannat didn't send = a team
+  // member replied. Silence Mannat for that chat right away (real time),
+  // instead of only noticing on the customer's next message.
+  // Off-switch: TAKEOVER_REALTIME=off in Vercel.
+  if (event?.event === 'message.sent') {
+    if (String(process.env.TAKEOVER_REALTIME || 'on').toLowerCase() === 'off') { console.log('[webhook] ignored event type: message.sent'); return; }
+    return handleOutgoingDm(event);
+  }
   if (event?.event === 'message.received') {
     const p = String(event?.account?.platform || event?.conversation?.platform || '').toLowerCase();
     if (p.includes('whatsapp') && !mannatWhatsAppRepliesOn()) {
@@ -581,6 +589,21 @@ async function handleEvent(event) {
     return handleReview(event, { generateReply, replyToReview, logLead, notifyEscalation, claimReplySlot, markReplySent, releaseReplySlot });
   }
   console.log('[webhook] ignored event type:', event?.event);
+}
+
+async function handleOutgoingDm(event) {
+  const message = event.message || {};
+  const conversation = event.conversation || {};
+  const account = event.account || {};
+  const dir = String(message.direction || event.direction || '').toLowerCase();
+  if (dir && !['outgoing', 'out', 'sent', 'outbound'].includes(dir)) return;
+  const platform = account.platform || conversation.platform;
+  const conversationId = conversation.id || conversation.conversationId;
+  const text = message.text || message.message || '';
+  if (!conversationId || !text) return;
+  const memoryId = `${platform || 'social'}:${conversationId}`;
+  const res = await recordOutgoingMessage({ memoryId, text });
+  if (res.human) console.log('[webhook] team member replied - Mannat silenced for this chat:', memoryId);
 }
 
 async function handleComment(event) {
@@ -1036,6 +1059,7 @@ async function handleMessage(event) {
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
+  let stoppedForHuman = false;
   if (accountId && result.reply) {
     try {
       const idempotencyKey = messageId
@@ -1045,10 +1069,13 @@ async function handleMessage(event) {
       // bubbles, natural pauses, "typing..." where supported. Each bubble is
       // registered with markAiSent BEFORE it is sent so the human-takeover
       // detector always recognises it as Mannat's, never as a team member's.
-      await sendLikeHuman({
+      const sentRes = await sendLikeHuman({
         reply: result.reply,
         typing: () => sendTypingIndicator({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId }),
         beforeSend: (text) => markAiSent(memoryId, text),
+        // FIX 2026-10-16: a team member jumped in while Mannat was typing -
+        // drop the rest of her reply rather than talk over them.
+        shouldStop: () => isHumanActive(memoryId),
         send: (text, i) => sendConversationMessage({
           apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text,
           idempotencyKey: idempotencyKey ? (i === 0 ? idempotencyKey : `${idempotencyKey}-p${i}`) : undefined,
@@ -1056,7 +1083,14 @@ async function handleMessage(event) {
       });
       try { await markReplySent(replyKey); }
       catch (err) { console.error('[webhook] DM sent but Redis status update failed:', err.message); }
-      await markAiSent(memoryId, result.reply);
+      if (sentRes?.stopped) {
+        stoppedForHuman = true;
+        const partial = (sentRes.bubbles || []).join('\n\n');
+        console.log('[webhook] team member took over mid-reply - rest of Mannat reply dropped:', memoryId);
+        result = { ...result, reply: partial };
+      } else {
+        await markAiSent(memoryId, result.reply);
+      }
     } catch (err) {
       console.error('[webhook] sendConversationMessage failed:', err.message);
       sendError = `Reply send failed: ${err.message}`;
@@ -1069,15 +1103,15 @@ async function handleMessage(event) {
 
   if (!sendError) {
     await saveTurn('conversation', memoryId, 'customer', messageText);
-    await saveTurn('conversation', memoryId, 'assistant', result.reply);
+    if (result.reply) await saveTurn('conversation', memoryId, 'assistant', result.reply);
   }
 
   await logLead({
     platform, contact: senderHandle, type: messageType, message: messageText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
+    reply: sendError ? '(send failed, see notes)' : (stoppedForHuman && !result.reply ? '(not sent - a team member replied while Mannat was typing)' : result.reply),
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), parsedForm?.altPhone ? `form_gave_two_numbers(also:${parsedForm.altPhone})` : '', result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId || inviteAnswer?.handoffId), invite.invited ? 'whatsapp_invite_asked' : '', inviteAnswer?.forward === 'whatsapp_yes' || inviteAnswer?.result ? 'whatsapp_invite_accepted' : '', inviteAnswer?.contextNote ? 'whatsapp_invite_declined' : '', formRef?.new ? 'meta_form_lead' : (formRef ? 'meta_form_lead_followup' : ''), parsedForm?.altPhone ? `form_gave_two_numbers(also:${parsedForm.altPhone})` : '', result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', stoppedForHuman ? 'human_takeover_mid_reply' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 

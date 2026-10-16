@@ -1,3 +1,4 @@
+const { markAiSent } = require('../lib/humanTakeoverGuard');
 const { replyToComment, sendConversationMessage, messageReplyIdempotencyKey, listInboxConversations, listInboxConversationMessages, listCommentedPosts, listPostComments } = require('../lib/zernioClient');
 const { generateReply } = require('../lib/replyEngine');
 const { logLead } = require('../lib/leadLog');
@@ -78,6 +79,9 @@ async function processConversation(conversation, result) {
   const ai = await makeReply({ platform, type: platform === 'whatsapp' ? 'whatsapp' : 'dm', text, context });
   if (!ai) return;
   try {
+    // 2026-10-16: fingerprint first, so the real-time takeover detector
+    // doesn't mistake this backfill reply for a team member's message.
+    await markAiSent(`${platform}:${conversationId}`, ai.reply);
     await sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text: ai.reply, idempotencyKey: messageReplyIdempotencyKey({ conversationId, accountId, messageId: inbound.id, text: ai.reply }) });
   } catch (err) {
     result.failed.push({ type: 'dm-send', conversationId, messageId: inbound.id, error: err.message });
