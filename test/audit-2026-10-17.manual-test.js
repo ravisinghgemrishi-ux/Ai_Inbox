@@ -58,3 +58,9 @@ assert.ok(!wh._shouldDmCommenter({ platform: 'facebook', commentText: 'Pp', resu
 assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: { leadStatus: 'NOT_A_LEAD' } }));
 assert.ok(/DM/.test(wh._commentDmPublicReply('Price batao')));
 console.log('Comment-DM tests passed');
+
+// 2026-10-17 live bug: decimals must not split sentences
+const r2 = require('../lib/replyEngine');
+assert.ok(!/^05-carat/.test(r2._removeFakeDmClaims('I have sent you a DM with the details of a 5.05-carat Ceylon Yellow Sapphire with you.', 'Pp', 'comment')));
+assert.ok(r2._removeFakeDmClaims('Our 5.05 carat Ceylon Pukhraj is lovely. I have sent you a DM with details. Which size?', 'Pp', 'comment').includes('5.05 carat'));
+console.log('Decimal-split test passed');
