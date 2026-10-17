@@ -46,3 +46,15 @@ assert.strictEqual(leads._normalizePhone('09068008500'), '+919068008500');
 assert.ok(formatMemory([{ role: 'team', text: 'hi' }]).startsWith('GemRishi team:'));
 
 console.log('All audit tests passed');
+
+// Comment -> DM (2026-10-17)
+const wh = require('../api/webhook.js');
+const lead = { leadStatus: 'WARM' };
+assert.ok(wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: lead }));
+assert.ok(wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Blue sapphire price', result: { leadStatus: 'HOT' } }));
+assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: '🔥🔥', result: lead }), 'emoji only -> no DM');
+assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Beautiful', result: lead }), 'praise -> no DM');
+assert.ok(!wh._shouldDmCommenter({ platform: 'facebook', commentText: 'Pp', result: lead }), 'Facebook off by default');
+assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: { leadStatus: 'NOT_A_LEAD' } }));
+assert.ok(/DM/.test(wh._commentDmPublicReply('Price batao')));
+console.log('Comment-DM tests passed');

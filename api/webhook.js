@@ -5,6 +5,7 @@ const {
   replyToReview,
   sendTypingIndicator,
   sendConversationMessage,
+  sendPrivateReply,
   messageReplyIdempotencyKey,
 } = require('../lib/zernioClient');
 const { generateReply } = require('../lib/replyEngine');
@@ -18,7 +19,7 @@ const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
-const { checkHumanTakeover, markAiSent, recordOutgoingMessage, isHumanActive } = require('../lib/humanTakeoverGuard');
+const { checkHumanTakeover, markAiSent, markAiSentAnyChat, recordOutgoingMessage, isHumanActive } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
 const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
@@ -611,6 +612,58 @@ async function handleOutgoingDm(event) {
   }
 }
 
+// --- Comment -> DM (2026-10-17, Ravi) ---------------------------------------
+// Which comments get a DM: Instagram by default (COMMENT_DM_PLATFORMS, comma
+// list; "off" disables). Pure emoji / praise comments and non-leads get only
+// the public reply - a DM for "🔥🔥" would feel like spam.
+function shouldDmCommenter({ platform, commentText, result }) {
+  const setting = String(process.env.COMMENT_DM_PLATFORMS || 'instagram').toLowerCase();
+  if (setting === 'off') return false;
+  if (!setting.split(',').map((x) => x.trim()).includes(String(platform || '').toLowerCase())) return false;
+  if (!/[\p{L}\p{N}]/u.test(String(commentText || ''))) return false; // emoji / stickers only
+  if (/^\s*(nice|wow|beautiful|awesome|great|super|amazing|good|love|lovely|jai|om|har har mahadev|radhe|thanks?|thank you|👍)\W*$/i.test(commentText)) return false;
+  if (['COLD', 'NOT_A_LEAD'].includes(result?.leadStatus)) return false;
+  if (result?.safetyNet || result?.generationFailed) return false;
+  return true;
+}
+
+function commentDmPublicReply(commentText, existingMemory = '') {
+  const hindi = looksHinglishOrHindi(commentText) || looksHinglishOrHindi(existingMemory);
+  const en = ['Hi! I\'ve sent you the details in your DMs 🙏', 'Sent you a DM with the details! 💎', 'Hi! Please check your DMs, I\'ve shared the details there 🙏'];
+  const hi = ['Namaste! Aapko DM mein details bhej di hain 🙏', 'Ji, details aapke DM mein bhej di hain 💎', 'Aapke DM mein details share kar di hain, please check kijiye 🙏'];
+  const list = hindi ? hi : en;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+// When the commenter replies to that DM, Mannat should know what she already
+// told them. Saved by Instagram username for 7 days (the DM conversation id
+// isn't known when the private reply is sent).
+async function saveCommentDmSeed(handle, commentText, dmText) {
+  const h = String(handle || '').toLowerCase();
+  if (!h || h === 'unknown') return;
+  const value = JSON.stringify({ comment: String(commentText).slice(0, 500), dm: String(dmText).slice(0, 1500) });
+  try { await redisCommand(`/set/${encodeURIComponent(`gemrishi:comment-dm-seed:${h}`)}/${encodeURIComponent(value)}/EX/${7 * 86400}`); }
+  catch (err) { console.error('[webhook] comment DM seed save failed:', err.message); }
+}
+
+async function useCommentDmSeed(handle, memoryId) {
+  const h = String(handle || '').toLowerCase();
+  if (!h || h === 'unknown') return '';
+  try {
+    const key = encodeURIComponent(`gemrishi:comment-dm-seed:${h}`);
+    const data = await redisCommand(`/get/${key}`);
+    if (!data?.result) return '';
+    const seed = JSON.parse(data.result);
+    await redisCommand(`/del/${key}`);
+    await saveTurn('conversation', memoryId, 'customer', `(commented on our post) ${seed.comment}`);
+    await saveTurn('conversation', memoryId, 'assistant', seed.dm);
+    return `Customer: (commented on our post) ${seed.comment}\nMannat: ${seed.dm}`;
+  } catch (err) {
+    console.error('[webhook] comment DM seed read failed:', err.message);
+    return '';
+  }
+}
+
 async function handleComment(event) {
   const comment = event.comment || {};
   const post = event.post || {};
@@ -722,6 +775,24 @@ async function handleComment(event) {
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
+  // 2026-10-17 (Ravi): Instagram's own comment auto-DM was switched off, so
+  // Mannat now DMs the commenter herself with the full answer, and the public
+  // reply is a short "sent you a DM". If the DM can't be sent, the full answer
+  // goes in the public reply exactly as before.
+  let dmSent = false;
+  if (postId && accountId && commentId && result.reply && shouldDmCommenter({ platform, commentText, result })) {
+    try {
+      const dmText = result.reply;
+      await markAiSentAnyChat(dmText);
+      await sendPrivateReply({ apiKey: process.env.ZERNIO_API_KEY, postId, commentId, accountId, text: dmText });
+      dmSent = true;
+      await saveCommentDmSeed(authorHandle, commentText, dmText);
+      result = { ...result, dmReply: dmText, reply: commentDmPublicReply(commentText, existingMemory) };
+    } catch (err) {
+      console.error('[webhook] private reply (comment DM) failed - answering publicly instead:', err.message);
+    }
+  }
+
   if (postId && accountId && result.reply) {
     try {
       await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: result.reply });
@@ -739,19 +810,19 @@ async function handleComment(event) {
 
   if (!sendError) {
     await saveTurn('comment', memoryId, 'customer', commentText);
-    await saveTurn('comment', memoryId, 'assistant', result.reply);
+    await saveTurn('comment', memoryId, 'assistant', result.dmReply || result.reply);
   }
 
   await logLead({
     platform, contact: authorHandle, type: 'comment', message: commentText,
-    reply: sendError ? '(send failed, see notes)' : result.reply,
+    reply: sendError ? '(send failed, see notes)' : (dmSent ? `[DM] ${result.dmReply}\n[Public] ${result.reply}` : result.reply),
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
-    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', sendError].filter(Boolean).join(' | '),
+    notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', dmSent ? 'comment_dm_sent' : '', sendError].filter(Boolean).join(' | '),
     replySuggestion: result.replyImprovement || '',
   });
 
-  const commentTrigger = handoffTrigger({ result, identity, inviteAnswer: null, cta, isComment: true });
+  const commentTrigger = handoffTrigger({ result: { ...result, reply: result.dmReply || result.reply }, identity, inviteAnswer: null, cta, isComment: true });
   if (commentTrigger) {
     await queueHandoff({ result, identity, platform, contact: authorHandle, memoryScope: 'comment', memoryId, intent: aiContext.intent.intent, trigger: commentTrigger });
   }
@@ -944,6 +1015,8 @@ async function handleMessage(event) {
       platformUserId: conversation.participantId || `conv_${conversationId}`, handle: senderHandle,
     });
     ownMemory = await loadContext('conversation', memoryId);
+    // 2026-10-17: first DM after Mannat DMed them about their comment.
+    if (!ownMemory && platform === 'instagram') ownMemory = await useCommentDmSeed(conversation.participantUsername || senderHandle, memoryId);
     // For a WhatsApp customer who arrived via a handoff link, their earlier
     // Instagram chat is placed before this chat's own history.
     existingMemory = [identity?.contactMemoryText, identity?.linkedMemoryText, ownMemory].filter(Boolean).join('\n');
@@ -1167,3 +1240,5 @@ function isFacebookDmPlatform(platform) {
 // test hooks (2026-10-07)
 module.exports._productQueryWithContext = productQueryWithContext;
 module.exports._handoffTrigger = handoffTrigger;
+module.exports._shouldDmCommenter = shouldDmCommenter;
+module.exports._commentDmPublicReply = commentDmPublicReply;
