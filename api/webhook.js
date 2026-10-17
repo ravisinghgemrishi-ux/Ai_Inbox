@@ -420,7 +420,7 @@ function handoffTrigger({ result, identity, inviteAnswer, cta, isComment }) {
   if (!isComment && phone && result?.leadStatus === 'HOT') return 'HOT lead, number given';
   // FIX (2026-10-07): Mannat promised a team follow-up (photos, price check,
   // call) - make sure the team actually hears about it.
-  if (!isComment && handoff.promisesTeamFollowUp(result?.reply)) return 'Mannat told the customer the team will follow up - please reply to them on Instagram';
+  if (handoff.promisesTeamFollowUp(result?.reply)) return 'Mannat told the customer the team will follow up - please reply to them on Instagram';
   return '';
 }
 
@@ -603,7 +603,12 @@ async function handleOutgoingDm(event) {
   if (!conversationId || !text) return;
   const memoryId = `${platform || 'social'}:${conversationId}`;
   const res = await recordOutgoingMessage({ memoryId, text });
-  if (res.human) console.log('[webhook] team member replied - Mannat silenced for this chat:', memoryId);
+  if (res.human) {
+    console.log('[webhook] team member replied - Mannat silenced for this chat:', memoryId);
+    // 2026-10-17 audit: remember what the team said, so when Mannat takes
+    // back over she stays consistent with it (manavpatel22011986 case).
+    await saveTurn('conversation', memoryId, 'team', text);
+  }
 }
 
 async function handleComment(event) {
@@ -1118,10 +1123,12 @@ async function handleMessage(event) {
   // 2026-10-04 (Ravi): organic Instagram customers who gave their number ->
   // "Instagram Leads (Mannat)" tab in the Gemstone Meta Leads sheet.
   if (!sendError) {
+    // 2026-10-17 audit: a return/complaint is a support case, not a HOT sale.
+    const isSupportCase = aiContext.intent.intent === 'support_issue' || /return|refund|replace|exchange|damaged|wrong item|complaint/i.test(`${result.escalateReason || ''}`);
     await recordInstagramLead({
       platform, type: messageType, handle: senderHandle, customerId: identity?.grId || '',
       name: result.customerName, phone: result.customerPhone, city: result.customerCity,
-      budget: result.customerBudget, interest: result.productInterest, leadStatus: result.leadStatus,
+      budget: result.customerBudget, interest: isSupportCase ? `SUPPORT: ${result.productInterest || 'return/complaint'}` : result.productInterest, leadStatus: isSupportCase ? 'SUPPORT (not a sale)' : result.leadStatus,
       isFormLead: Boolean(formRef),
     });
   }
