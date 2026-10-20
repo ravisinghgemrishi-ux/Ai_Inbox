@@ -1009,6 +1009,7 @@ async function handleMessage(event) {
   const isNewFormLead = formLead.isFormLead(messageText);
   let formRef = null;
   let parsedForm = null;
+  let handover = { escalate: false, reason: '', note: '' };
   try {
     identity = await prepareInbound({
       platform, event, messageText, conversationId,
@@ -1037,6 +1038,10 @@ async function handleMessage(event) {
       }
     }
     aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: messageText, knownPhone: identity?.knownPhone || parsedForm?.phone || '' })}`;
+    // 2026-10-20 audit: same size asked 3x / annoyed customer -> stop
+    // pitching and hand the chat to the team (see conversationGuards.js).
+    handover = guards.handoverCheck({ memory: existingMemory, message: messageText, knownPhone: identity?.knownPhone || parsedForm?.phone || '' });
+    if (handover.note) aiContext.contextText += `\n\n${handover.note}`;
     // FIX 6 (2026-10-07, Ravi): "call now" must never be answered with a
     // false "team is calling you right now" - and must respect office hours
     // (after 7 PM -> tomorrow after 10 AM; before 10 AM -> today after 10 AM).
@@ -1105,6 +1110,7 @@ async function handleMessage(event) {
     fromGeneralReply = false;
   }
   result = mergeEscalation(result, messageText, false);
+  if (handover.escalate) result = { ...result, escalate: true, escalateReason: result.escalateReason || handover.reason };
   // Already-known name/phone (e.g. the WhatsApp number itself) count as given.
   result = {
     ...result,
