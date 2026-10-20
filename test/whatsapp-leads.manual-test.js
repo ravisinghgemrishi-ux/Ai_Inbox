@@ -21,3 +21,14 @@ assert.strictEqual(p[3], 'not given');
 assert.ok(p[6].includes('50k tak'));
 
 console.log('WhatsApp lead tests passed');
+
+// Language on WhatsApp (2026-10-20): Hinglish by default, explicit request wins.
+const kb = require('../lib/knowledgeBase');
+const hi = (m, mem, p) => kb.replyShouldBeHindi(m, mem, { platform: p });
+assert.strictEqual(hi('I need opal 5 ratti', '', 'whatsapp'), true, 'WhatsApp default Hinglish');
+assert.strictEqual(hi('Hi', '', 'whatsapp'), true);
+assert.strictEqual(hi('ok', 'Customer: I need opal\nCustomer: Hindi me baat kijiye plz', 'whatsapp'), true);
+assert.strictEqual(hi('ok', 'Customer: kitna price hai\nCustomer: English please', 'whatsapp'), false, 'asked for English');
+assert.strictEqual(hi('I would like to know the price of a natural blue sapphire', 'Customer: Hello I am looking for a certified blue sapphire for my father', 'whatsapp'), false, 'clear English writer');
+assert.strictEqual(hi('I need opal 5 ratti', '', 'instagram'), false, 'Instagram unchanged');
+console.log('WhatsApp language tests passed');

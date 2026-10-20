@@ -18,7 +18,7 @@ const { notifyEscalation, notifyHotLead } = require('../lib/escalationNotifier')
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
-const { detectReplyLanguageNote, looksHinglishOrHindi } = require('../lib/knowledgeBase');
+const { detectReplyLanguageNote, looksHinglishOrHindi, replyShouldBeHindi } = require('../lib/knowledgeBase');
 const { checkHumanTakeover, markAiSent, markAiSentAnyChat, recordOutgoingMessage, isHumanActive } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
@@ -291,7 +291,7 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
   // Hinglish into plain English mid-conversation - see knowledgeBase.js's
   // detectReplyLanguageNote for why a deterministic per-turn note is used
   // instead of relying only on the general "match their language" prose.
-  const languageNote = detectReplyLanguageNote(messageText, existingMemory);
+  const languageNote = detectReplyLanguageNote(messageText, existingMemory, { platform });
   if (languageNote) parts.push(languageNote);
   if (postCaption) parts.push(`POST CONTEXT: ${postCaption}`);
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
@@ -347,12 +347,12 @@ const ASK_NAME_PHONE_NOTE_HI = 'Agar aapne abhi tak apna naam aur contact number
 const CONTACT_SHARE_NOTE_EN = `You can also reach us directly at ${GEMRISHI_CONTACT_NUMBER}.`;
 const CONTACT_SHARE_NOTE_HI = `Aap humein seedha ${GEMRISHI_CONTACT_NUMBER} par bhi contact kar sakte hain.`;
 
-function appendWorkingHoursNote(reply, message, existingMemory, result) {
+function appendWorkingHoursNote(reply, message, existingMemory, result, platform = '') {
   if (!reply) return reply;
   // 2026-10-04 (audit): this long note was appended to EVERY escalated reply,
   // so the same paragraph repeated down the chat. Now once per conversation.
   if (/10 AM - 8 PM|10 AM se 8 PM/.test(String(existingMemory || ''))) return reply;
-  const isHindi = looksHinglishOrHindi(message) || looksHinglishOrHindi(existingMemory);
+  const isHindi = replyShouldBeHindi(message, existingMemory, { platform }) || looksHinglishOrHindi(message);
   const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
   // Only ask for what's actually missing (on WhatsApp the number is known).
   if (!result?.customerName && !result?.customerPhone) {
@@ -1060,7 +1060,7 @@ async function handleMessage(event) {
   // 2026-09-24), same on/off convention as the consultation flow below.
   // Added 2026-09-29 (Ravi): is this the customer's answer to Mannat's
   // one-time "shall we continue on WhatsApp?" question?
-  const dmHindi = looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory);
+  const dmHindi = replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText) || looksHinglishOrHindi(existingMemory);
   const inviteAnswer = (formRef || pipelineError) ? null : await handleInviteAnswer({
     identity, messageText, existingMemory, memoryScope: 'conversation', memoryId,
     conversationId, platformUserId: conversation.participantId || senderHandle, hindi: dmHindi,
@@ -1125,7 +1125,7 @@ async function handleMessage(event) {
   if (!inviteAnswer?.result) {
     result = { ...result, reply: guards.cleanReply({ reply: result.reply, memory: existingMemory, message: messageText, knownPhone: result.customerPhone, isFirstReply: !ownMemory }) };
   }
-  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result) };
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result, platform) };
   const cta = formRef ? { reply: result.reply, handoffId: '' } : await addHandoffCta({
     identity, reply: result.reply, messageText, existingMemory, memoryScope: 'conversation', memoryId,
     conversationId, platformUserId: conversation.participantId || senderHandle, isComment: false,
