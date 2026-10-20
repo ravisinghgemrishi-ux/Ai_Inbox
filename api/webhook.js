@@ -34,6 +34,7 @@ const { collectBurst } = require('../lib/messageBatcher');
 const guards = require('../lib/conversationGuards');
 const handoff = require('../lib/handoff');
 const identityBridge = require('../lib/identityBridge');
+const salesInterview = require('../lib/salesInterview');
 const formLead = require('../lib/formLead');
 const callWindow = require('../lib/callWindow');
 const { recordInstagramLead } = require('../lib/instagramLeads');
@@ -638,8 +639,23 @@ async function handleEvent(event) {
       const sender = identityBridge.extractWhatsAppSender(event);
       const staffRoute = sender?.kind === 'phone' ? handoff.routeForStaffNumber(sender.id) : '';
       if (staffRoute) {
+        const convId = event?.conversation?.id || event?.conversation?.conversationId;
+        const accId = event?.account?.accountId || event?.account?.id;
+        // 2026-10-20: sales interview in progress -> this message is an answer.
         try {
-          const res = await handoff.staffCheckIn({ route: staffRoute, conversationId: event?.conversation?.id || event?.conversation?.conversationId, accountId: event?.account?.accountId || event?.account?.id });
+          const msgId = event?.message?.id || '';
+          if (await salesInterview.isActive(staffRoute)) {
+            const fresh = msgId ? (await redisCommand(`/set/${encodeURIComponent(`gemrishi:interview:msg:${msgId}`)}/1/EX/86400/NX`))?.result === 'OK' : true;
+            if (fresh) {
+              await handoff.openStaffWindow({ route: staffRoute, conversationId: convId, accountId: accId });
+              const send = (text, i) => sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId: convId, accountId: accId, text, idempotencyKey: `interview-${msgId || Date.now()}-${i}` });
+              await salesInterview.handleReply({ route: staffRoute, person: handoff.ROUTES[staffRoute].person, text: event?.message?.text || event?.message?.message || '', send, log: logLead });
+            }
+            return;
+          }
+        } catch (err) { console.error('[interview] failed:', err.message); return; }
+        try {
+          const res = await handoff.staffCheckIn({ route: staffRoute, conversationId: convId, accountId: accId });
           console.log('[staff-checkin]', staffRoute, JSON.stringify(res));
         } catch (err) { console.error('[staff-checkin] failed:', err.message); }
         return;
