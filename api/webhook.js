@@ -390,28 +390,6 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText }, { escalateToNeel });
-    // 2026-10-20 (Neel): late at night (8 PM - 10 AM IST) a lead goes to
-    // EVERY team number (Neel, Yogesh, Vishvas) so whoever is free picks it up.
-    if (handoff.isLateNight()) {
-      const base = {
-        grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
-        customerName: result?.customerName || identity?.knownName || '',
-        customerPhone: result?.customerPhone || identity?.knownPhone || '',
-        customerCity: result?.customerCity || '',
-        customerBudget: result?.customerBudget || '',
-        productInterest: result?.productInterest || '',
-        reason: result?.escalate ? result?.escalateReason || '' : '',
-        trigger: `${trigger}${trigger ? ' - ' : ''}late-night lead, sent to all`,
-        ...extra,
-      };
-      let any = false;
-      for (const r of handoff.LATE_NIGHT_ROUTES) {
-        const qq = await handoff.queueForward({ ...base, route: r });
-        any = any || qq.queued;
-      }
-      if (any) scheduleFlush();
-      return { queued: any };
-    }
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
       customerName: result?.customerName || identity?.knownName || '',
@@ -1182,6 +1160,8 @@ async function handleMessage(event) {
     // 2026-10-20: any call request (not only "call now") -> team calls.
     const immediateCallNote = callWindow.callRequestNote(messageText, replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText));
     if (immediateCallNote) aiContext.contextText += `\n\n${immediateCallNote}`;
+    const offHoursNote = callWindow.afterHoursNote(replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText));
+    if (offHoursNote) aiContext.contextText += `\n\n${offHoursNote}`;
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
