@@ -46,3 +46,15 @@ console.log('Call request tests passed');
 const guardsC = require('../lib/conversationGuards');
 assert.ok(/CONFUSED/.test(guardsC.handoverCheck({ memory: '', message: 'Kuch samjh nhi aya' }).note));
 console.log('Confused-customer test passed');
+
+// 220 gate (2026-10-20): only Meta ads, Meta forms and Instagram chats.
+const whk = require('../api/webhook.js');
+const sig = (text, extra = {}) => whk._whatsappEntrySignal({ message: { text, ...extra.message }, conversation: extra.conversation || {} }, text);
+assert.strictEqual(sig('Hi', { message: { metadata: { referral: { source_type: 'ad' } } } }), 'meta_ad');
+assert.strictEqual(sig('Hello', { conversation: { metadata: { ctwa_clid: 'Ab12' } } }), 'meta_ad');
+assert.strictEqual(sig('Full name: Ravi\nPhone number: 9999999999'), 'meta_form');
+assert.strictEqual(sig('INSTA'), 'instagram');
+assert.strictEqual(sig('instagram se aaya hoon'), 'instagram');
+assert.strictEqual(sig('Hi GemRishi, Ref: WH-AB12CD'), 'instagram_code');
+for (const t of ['Hi', 'I need opal 5 ratti', 'bhai kal milte hain', 'Good morning']) assert.strictEqual(sig(t), '', t);
+console.log('220 gate tests passed');

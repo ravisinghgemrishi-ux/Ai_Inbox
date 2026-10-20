@@ -541,6 +541,54 @@ function mannatWhatsAppRepliesOn() {
   return String(process.env.MANNAT_WHATSAPP_REPLIES || 'off').toLowerCase() === 'on';
 }
 
+// =============================================================================
+// 2026-10-20 (Ravi): on Mannat's WhatsApp line (+91 74969 97220) she replies
+// ONLY in chats that came from
+//   - a Meta Click-to-WhatsApp ad (Meta attaches a `referral` / ctwa_clid to
+//     the first message),
+//   - a Meta lead form (form answers pasted as "Full name: ... Phone: ..."),
+//   - Instagram (the comment invite asks people to send "INSTA", or the
+//     customer is already linked to an Instagram chat / mentions Instagram).
+// Every other chat (personal contacts, old customers, random people): Mannat
+// stays silent and nothing is logged - the team replies from the app.
+// Once a chat qualifies it stays active for 90 days.
+// Off-switch: WHATSAPP_ONLY_ADS_AND_INSTA=off (Mannat replies to everyone).
+// =============================================================================
+const INSTA_SIGNAL = /\b(insta|instagram|insta\s*se|ig\s*se)\b/i;
+function whatsappEntrySignal(event, messageText) {
+  const m = event?.message || {};
+  const c = event?.conversation || {};
+  const meta = { ...(c.metadata || {}), ...(m.metadata || {}) };
+  if (meta.referral || meta.ctwa_clid || meta.ctwa_source_id || m.referral || event?.referral) return 'meta_ad';
+  if (formLead.isFormLead(messageText)) return 'meta_form';
+  if (/\bWH-[A-Z0-9]{4,}\b/i.test(messageText) || /\bGR-\d{3,}\b/i.test(messageText)) return 'instagram_code';
+  if (INSTA_SIGNAL.test(messageText)) return 'instagram';
+  return '';
+}
+function onlyAdsAndInstaOn() {
+  return String(process.env.WHATSAPP_ONLY_ADS_AND_INSTA || 'on').toLowerCase() !== 'off';
+}
+async function whatsappChatAllowed(event) {
+  if (!onlyAdsAndInstaOn()) return true;
+  const conversationId = event?.conversation?.id || event?.conversation?.conversationId || '';
+  if (!conversationId) return false;
+  const key = `gemrishi:wa-active:${conversationId}`;
+  try {
+    const got = await redisCommand(`/get/${encodeURIComponent(key)}`);
+    if (got?.result) return true;
+  } catch (err) { console.error('[wa-gate] redis read failed:', err.message); }
+  const text = String(event?.message?.text || event?.message?.message || '');
+  const signal = whatsappEntrySignal(event, text);
+  if (!signal) {
+    console.log('[wa-gate] not an ad / Instagram chat - Mannat stays silent:', conversationId);
+    return false;
+  }
+  try { await redisCommand(`/set/${encodeURIComponent(key)}/${encodeURIComponent(signal)}/EX/${90 * 86400}`); }
+  catch (err) { console.error('[wa-gate] redis write failed:', err.message); }
+  console.log('[wa-gate] chat activated:', conversationId, signal);
+  return true;
+}
+
 async function handleEvent(event) {
   // Any due one-time handoffs go out now (cheap check, runs in background).
   runInBackground(handoff.flushDue());
@@ -583,6 +631,7 @@ async function handleEvent(event) {
       console.log('[webhook] WhatsApp account is not Mannat\'s - not auto-replying:', event?.account?.accountId || event?.account?.id);
       return;
     }
+    if (p.includes('whatsapp') && !(await whatsappChatAllowed(event))) return;
     return handleMessage(event);
   }
   // Added 2026-09-29 (Ravi): Google Business Profile reviews. review.updated
@@ -1250,4 +1299,5 @@ function isFacebookDmPlatform(platform) {
 module.exports._productQueryWithContext = productQueryWithContext;
 module.exports._handoffTrigger = handoffTrigger;
 module.exports._shouldDmCommenter = shouldDmCommenter;
+module.exports._whatsappEntrySignal = whatsappEntrySignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;
