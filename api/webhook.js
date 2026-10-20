@@ -1046,7 +1046,8 @@ async function handleMessage(event) {
     // FIX 6 (2026-10-07, Ravi): "call now" must never be answered with a
     // false "team is calling you right now" - and must respect office hours
     // (after 7 PM -> tomorrow after 10 AM; before 10 AM -> today after 10 AM).
-    const immediateCallNote = callWindow.immediateCallNote(messageText, looksHinglishOrHindi(messageText));
+    // 2026-10-20: any call request (not only "call now") -> team calls.
+    const immediateCallNote = callWindow.callRequestNote(messageText, replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText));
     if (immediateCallNote) aiContext.contextText += `\n\n${immediateCallNote}`;
   } catch (err) {
     pipelineError = err;
@@ -1223,6 +1224,7 @@ async function handleMessage(event) {
     if (!formRef.new && formLead.looksLikePreference(messageText)) extra.preference = messageText.slice(0, 200);
   }
   if (aiContext.intent.intent === 'b2b_inquiry') { extra.route = 'neel'; trigger = trigger || 'B2B / wholesale enquiry'; }
+  if (callWindow.looksLikeCallRequest(messageText)) { extra.keySuffix = 'call'; trigger = 'CUSTOMER ASKED FOR A CALL - please call them'; }
   if (trigger) {
     await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, intent: aiContext.intent.intent, trigger, extra });
   }

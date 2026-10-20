@@ -32,3 +32,17 @@ assert.strictEqual(hi('ok', 'Customer: kitna price hai\nCustomer: English please
 assert.strictEqual(hi('I would like to know the price of a natural blue sapphire', 'Customer: Hello I am looking for a certified blue sapphire for my father', 'whatsapp'), false, 'clear English writer');
 assert.strictEqual(hi('I need opal 5 ratti', '', 'instagram'), false, 'Instagram unchanged');
 console.log('WhatsApp language tests passed');
+
+// Call requests (2026-10-20): always a hand-over.
+const cw = require('../lib/callWindow');
+const esc = require('../lib/escalationPolicy');
+for (const m of ['Mujhe call kiiiye', 'call kijiye', 'please call me', 'mujhe call karo', 'phone kar do', 'call now']) {
+  assert.ok(cw.looksLikeCallRequest(m), m);
+  assert.strictEqual(esc.getDeterministicEscalation(m).escalate, true, m);
+  assert.ok(/Never say you cannot call|RIGHT NOW/.test(cw.callRequestNote(m, true)), m);
+}
+for (const m of ['I need opal 5 ratti', 'Kuch samjh nhi aya', 'ring chahiye', 'Ring', 'calling hours?', 'mujhe opal ke baare mein baat karni hai']) assert.ok(!cw.looksLikeCallRequest(m), m);
+console.log('Call request tests passed');
+const guardsC = require('../lib/conversationGuards');
+assert.ok(/CONFUSED/.test(guardsC.handoverCheck({ memory: '', message: 'Kuch samjh nhi aya' }).note));
+console.log('Confused-customer test passed');
