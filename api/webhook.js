@@ -375,8 +375,12 @@ function appendWorkingHoursNote(reply, message, existingMemory, result, platform
 // customer has stopped typing (see lib/handoff.js).
 async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, intent = '', trigger = '', extra = {} }) {
   try {
-    // 2026-10-20 (Ravi): every WhatsApp lead goes to Neel, form leads included.
-    const route = String(platform).toLowerCase().includes('whatsapp') ? 'neel' : extra.route || handoff.routeFor({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent, platform });
+    // 2026-10-20 (Ravi): budget routing for WhatsApp AND Instagram -
+    // problems / B2B / 50k+ -> Neel; under 50k or unknown -> Yogesh and
+    // Vishvas in turn (see lib/handoff.js assignRoute).
+    const budgetText = [result?.customerBudget, extra.customerBudget].filter(Boolean).join(' ');
+    const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
+    const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText }, { escalateToNeel });
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
       customerName: result?.customerName || identity?.knownName || '',
