@@ -33,6 +33,7 @@ const { collectBurst } = require('../lib/messageBatcher');
 // Meta form leads.
 const guards = require('../lib/conversationGuards');
 const handoff = require('../lib/handoff');
+const identityBridge = require('../lib/identityBridge');
 const formLead = require('../lib/formLead');
 const callWindow = require('../lib/callWindow');
 const { recordInstagramLead } = require('../lib/instagramLeads');
@@ -629,6 +630,20 @@ async function handleEvent(event) {
     if (!mannatWhatsAppAllowed(event)) {
       console.log('[webhook] WhatsApp account is not Mannat\'s - not auto-replying:', event?.account?.accountId || event?.account?.id);
       return;
+    }
+    // 2026-10-20 (Ravi): Neel / Yogesh / Vishvas / Mannat Chawla message the
+    // 220 number ("Any new lead for me") -> their waiting leads are sent and
+    // new ones arrive in that chat for 24 hours. Never an AI reply.
+    if (p.includes('whatsapp')) {
+      const sender = identityBridge.extractWhatsAppSender(event);
+      const staffRoute = sender?.kind === 'phone' ? handoff.routeForStaffNumber(sender.id) : '';
+      if (staffRoute) {
+        try {
+          const res = await handoff.staffCheckIn({ route: staffRoute, conversationId: event?.conversation?.id || event?.conversation?.conversationId, accountId: event?.account?.accountId || event?.account?.id });
+          console.log('[staff-checkin]', staffRoute, JSON.stringify(res));
+        } catch (err) { console.error('[staff-checkin] failed:', err.message); }
+        return;
+      }
     }
     if (p.includes('whatsapp') && !(await whatsappChatAllowed(event))) return;
     return handleMessage(event);
