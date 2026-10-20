@@ -375,7 +375,8 @@ function appendWorkingHoursNote(reply, message, existingMemory, result) {
 // customer has stopped typing (see lib/handoff.js).
 async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, intent = '', trigger = '', extra = {} }) {
   try {
-    const route = extra.route || handoff.routeFor({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
+    // 2026-10-20 (Ravi): every WhatsApp lead goes to Neel, form leads included.
+    const route = String(platform).toLowerCase().includes('whatsapp') ? 'neel' : extra.route || handoff.routeFor({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent, platform });
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
       customerName: result?.customerName || identity?.knownName || '',
@@ -421,7 +422,7 @@ function handoffTrigger({ result, identity, inviteAnswer, cta, isComment }) {
   if (!isComment && phone && result?.leadStatus === 'HOT') return 'HOT lead, number given';
   // FIX (2026-10-07): Mannat promised a team follow-up (photos, price check,
   // call) - make sure the team actually hears about it.
-  if (handoff.promisesTeamFollowUp(result?.reply)) return 'Mannat told the customer the team will follow up - please reply to them on Instagram';
+  if (handoff.promisesTeamFollowUp(result?.reply)) return 'Mannat told the customer the team will follow up - please reply to them';
   return '';
 }
 
