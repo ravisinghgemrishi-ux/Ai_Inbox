@@ -644,6 +644,17 @@ async function handleEvent(event) {
         // 2026-10-20: sales interview in progress -> this message is an answer.
         try {
           const msgId = event?.message?.id || '';
+          const staffText = String(event?.message?.text || event?.message?.message || '').trim();
+          // "training" / "start training" / "interview" starts (or restarts) it.
+          if (/^(start\s*)?(training|interview|train\s*mannat)\b/i.test(staffText) && !(await salesInterview.isActive(staffRoute))) {
+            const fresh0 = msgId ? (await redisCommand(`/set/${encodeURIComponent(`gemrishi:interview:msg:${msgId}`)}/1/EX/86400/NX`))?.result === 'OK' : true;
+            if (fresh0) {
+              await handoff.openStaffWindow({ route: staffRoute, conversationId: convId, accountId: accId });
+              const send0 = (text, i) => sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId: convId, accountId: accId, text, idempotencyKey: `interview-start-${msgId || Date.now()}-${i}` });
+              await salesInterview.start({ route: staffRoute, person: handoff.ROUTES[staffRoute].person, send: send0 });
+            }
+            return;
+          }
           if (await salesInterview.isActive(staffRoute)) {
             const fresh = msgId ? (await redisCommand(`/set/${encodeURIComponent(`gemrishi:interview:msg:${msgId}`)}/1/EX/86400/NX`))?.result === 'OK' : true;
             if (fresh) {
