@@ -35,6 +35,7 @@ const guards = require('../lib/conversationGuards');
 const handoff = require('../lib/handoff');
 const identityBridge = require('../lib/identityBridge');
 const salesInterview = require('../lib/salesInterview');
+const metaTracking = require('../lib/metaTracking');
 const formLead = require('../lib/formLead');
 const callWindow = require('../lib/callWindow');
 const { recordInstagramLead } = require('../lib/instagramLeads');
@@ -381,6 +382,12 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     // problems / B2B / 50k+ -> Neel; under 50k or unknown -> Yogesh and
     // Vishvas in turn (see lib/handoff.js assignRoute).
     const budgetText = [result?.customerBudget, extra.customerBudget].filter(Boolean).join(' ');
+    // 2026-10-20: tell Meta this ad chat became a genuine lead (WhatsApp 220
+    // only gets Meta-ad / Meta-form chats). Once per customer; background.
+    if (String(platform).toLowerCase().includes('whatsapp')) {
+      const leadPhone = result?.customerPhone || identity?.knownPhone || '';
+      if (leadPhone) runInBackground(metaTracking.leadSubmitted({ phone: leadPhone, budget: budgetText, productInterest: result?.productInterest || '' }));
+    }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText }, { escalateToNeel });
     // 2026-10-20 (Neel): late at night (8 PM - 10 AM IST) a lead goes to
@@ -663,6 +670,20 @@ async function handleEvent(event) {
       if (staffRoute) {
         const convId = event?.conversation?.id || event?.conversation?.conversationId;
         const accId = event?.account?.accountId || event?.account?.id;
+        // 2026-10-20: "sold 9876543210 45000" -> Purchase event to Meta.
+        const sale = metaTracking.parseSaleCommand(event?.message?.text || event?.message?.message || '');
+        if (sale) {
+          const reply = (text) => sendConversationMessage({ apiKey: process.env.ZERNIO_API_KEY, conversationId: convId, accountId: accId, text, idempotencyKey: `sale-reply-${event?.message?.id || Date.now()}` });
+          try {
+            if (sale.error === 'phone') await reply('Customer ka 10 digit number bhi likhiye, jaise: sold 9876543210 45000');
+            else if (sale.error === 'amount') await reply(`Amount bhi likhiye, jaise: sold ${sale.phone} 45000`);
+            else {
+              const r = await metaTracking.purchase({ phone: sale.phone, amount: sale.amount, reportedBy: handoff.ROUTES[staffRoute].person });
+              await reply(r.sent ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. Meta ko bata diya.` : `Sale note nahi ho paayi (${String(r.reason || '').slice(0, 80)}). Ravi ko bata dijiye.`);
+            }
+          } catch (err) { console.error('[sale] failed:', err.message); }
+          return;
+        }
         // 2026-10-20: sales interview in progress -> this message is an answer.
         try {
           const msgId = event?.message?.id || '';
