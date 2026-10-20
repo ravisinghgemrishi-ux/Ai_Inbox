@@ -38,23 +38,11 @@ const iv = require('../lib/salesInterview');
   console.log('Sales interview tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });
 
-// Round 2: follow-up set after the main set is done.
+// Follow-up round cancelled: after the main set, nothing more to start.
 (async () => {
   await new Promise((r) => setTimeout(r, 50));
   const iv2 = require('../lib/salesInterview');
-  const sent = []; const logs = [];
-  const send = async (t) => sent.push(t); const log = async (r) => logs.push(r);
-  // pretend main finished the old way (no doneSets field)
   store['gemrishi:interview:yogesh'] = JSON.stringify({ idx: 57, done: true });
-  assert.strictEqual(await iv2.nextSet('yogesh'), 'followup');
-  await iv2.start({ route: 'yogesh', person: 'Yogesh', send });
-  assert.ok(/purane rules se alag/.test(sent[0]) && /Q1\/6/.test(sent[1]));
-  for (const t of ['2', '2 Ambala Cantt, Sadar Bazar 133001', '1', '1', '3', '1']) await iv2.handleReply({ route: 'yogesh', person: 'Yogesh', text: t, send, log });
-  assert.ok(/Saare 6 sawal/.test(sent.at(-1)));
   assert.strictEqual(await iv2.nextSet('yogesh'), '');
-  const fa = await iv2.answers('yogesh', 'followup');
-  assert.strictEqual(fa.length, 6);
-  assert.ok(/Note: Ambala Cantt/.test(fa[1].answer));
-  assert.ok(/^FQ1 /.test(logs[0].message));
-  console.log('Follow-up round tests passed');
+  console.log('No follow-up round test passed');
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -31,5 +31,12 @@ for (const [b, v] of [['50000', 50000], ['₹25,000', 25000], ['40-45k', 45000],
   assert.ok(h.needsNeel({ escalate: true, escalateReason: 'refund request' }));
   assert.ok(h.needsNeel({ intent: 'b2b_inquiry' }));
   assert.ok(!h.needsNeel({ escalate: true, escalateReason: 'customer_asked_for_a_call' }), 'a call request follows the budget rule');
+  const at = (h, m = 0) => new Date(Date.UTC(2026, 9, 20, h, m)); // UTC
+  assert.strictEqual(h.isLateNight(at(15, 0)), true, '20:30 IST');
+  assert.strictEqual(h.isLateNight(at(17, 30)), true, '23:00 IST');
+  assert.strictEqual(h.isLateNight(at(3, 0)), true, '08:30 IST');
+  assert.strictEqual(h.isLateNight(at(5, 0)), false, '10:30 IST');
+  assert.strictEqual(h.isLateNight(at(14, 0)), false, '19:30 IST');
+  assert.deepStrictEqual(h.LATE_NIGHT_ROUTES, ['neel', 'yogesh', 'vishvas']);
   console.log('Budget routing tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });
