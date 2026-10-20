@@ -543,26 +543,21 @@ function mannatWhatsAppRepliesOn() {
 
 // =============================================================================
 // 2026-10-20 (Ravi): on Mannat's WhatsApp line (+91 74969 97220) she replies
-// ONLY in chats that came from
+// ONLY in chats that came from Meta:
 //   - a Meta Click-to-WhatsApp ad (Meta attaches a `referral` / ctwa_clid to
 //     the first message),
-//   - a Meta lead form (form answers pasted as "Full name: ... Phone: ..."),
-//   - Instagram (the comment invite asks people to send "INSTA", or the
-//     customer is already linked to an Instagram chat / mentions Instagram).
-// Every other chat (personal contacts, old customers, random people): Mannat
-// stays silent and nothing is logged - the team replies from the app.
-// Once a chat qualifies it stays active for 90 days.
+//   - a Meta lead form (form answers pasted as "Full name: ... Phone: ...").
+// Instagram customers are sent to Mannat Chawla's number (98179 75978), not
+// here. Every other chat: Mannat stays silent and nothing is logged - the
+// team replies from the app. Once a chat qualifies it stays active 90 days.
 // Off-switch: WHATSAPP_ONLY_ADS_AND_INSTA=off (Mannat replies to everyone).
 // =============================================================================
-const INSTA_SIGNAL = /\b(insta|instagram|insta\s*se|ig\s*se)\b/i;
 function whatsappEntrySignal(event, messageText) {
   const m = event?.message || {};
   const c = event?.conversation || {};
   const meta = { ...(c.metadata || {}), ...(m.metadata || {}) };
   if (meta.referral || meta.ctwa_clid || meta.ctwa_source_id || m.referral || event?.referral) return 'meta_ad';
   if (formLead.isFormLead(messageText)) return 'meta_form';
-  if (/\bWH-[A-Z0-9]{4,}\b/i.test(messageText) || /\bGR-\d{3,}\b/i.test(messageText)) return 'instagram_code';
-  if (INSTA_SIGNAL.test(messageText)) return 'instagram';
   return '';
 }
 function onlyAdsAndInstaOn() {
@@ -580,7 +575,7 @@ async function whatsappChatAllowed(event) {
   const text = String(event?.message?.text || event?.message?.message || '');
   const signal = whatsappEntrySignal(event, text);
   if (!signal) {
-    console.log('[wa-gate] not an ad / Instagram chat - Mannat stays silent:', conversationId);
+    console.log('[wa-gate] not a Meta ad / form chat - Mannat stays silent:', conversationId);
     return false;
   }
   try { await redisCommand(`/set/${encodeURIComponent(key)}/${encodeURIComponent(signal)}/EX/${90 * 86400}`); }
