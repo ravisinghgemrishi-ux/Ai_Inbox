@@ -29,3 +29,20 @@ const wh = require('../api/webhook.js');
   assert.strictEqual(r.invited, false);
   console.log('comments-public tests passed');
 })().catch((e) => { console.error(e); process.exit(1); });
+
+// 2026-10-21: customer is told their requirement went to the team
+{
+  const wh2 = require('../api/webhook.js');
+  const night = new Date('2026-10-21T17:30:00Z'); // 11 PM IST
+  const day = new Date('2026-10-21T06:30:00Z'); // 12 PM IST
+  const early = new Date('2026-10-21T02:30:00Z'); // 8 AM IST
+  let t = wh2._withForwardedLine('Our 5 ratti Neelam is ₹45,000.', { trigger: 'HOT lead, number given', now: night });
+  assert.ok(/shared your requirements with our team/.test(t) && /tomorrow after 10 AM/.test(t) && /10 AM - 8 PM/.test(t), t);
+  t = wh2._withForwardedLine('Ji, 5 ratti Neelam ₹45,000 ka hai.', { trigger: 'x', hindi: true, now: early });
+  assert.ok(/team ko share kar di hai/.test(t) && /aaj subah 10 baje/.test(t), t);
+  t = wh2._withForwardedLine('Great choice.', { trigger: 'x', now: day });
+  assert.ok(/get in touch with you shortly/.test(t));
+  assert.strictEqual(wh2._withForwardedLine('Great choice.', { trigger: '', now: day }), 'Great choice.', 'no forward, no line');
+  assert.strictEqual(wh2._withForwardedLine('Great choice.', { trigger: 'x', existingMemory: "Mannat: I've shared your requirements with our team ✅", now: day }), 'Great choice.', 'only once per chat');
+  console.log('forwarded-line tests passed');
+}
