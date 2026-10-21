@@ -5,10 +5,6 @@
       "schedule": "30 13 * * *"
     },
     {
-      "path": "/api/lead-tracker-hourly",
-      "schedule": "0 * * * *"
-    },
-    {
       "path": "/api/lead-tracker-daily",
       "schedule": "30 14 * * *"
     }
