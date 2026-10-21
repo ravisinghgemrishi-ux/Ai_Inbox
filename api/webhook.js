@@ -398,6 +398,31 @@ function appendWorkingHoursNote(reply, message, existingMemory, result, platform
 // team many times a day), the chat is queued for ONE handoff to the right
 // person - sales -> Mannat Chawla, escalations/B2B -> Neel - sent once the
 // customer has stopped typing (see lib/handoff.js).
+// 2026-10-21 (Ravi: "form data is going on insta dm and whatsapp both"):
+// one Meta form can open a chat on Instagram AND WhatsApp (two GR ids). The
+// first channel's GR id owns the lead; the other channel is linked to it so
+// the team gets ONE forward, to ONE person, for the whole customer.
+async function formLeadDedupeKey(grId, formPhone) {
+  if (!grId) return '';
+  try {
+    const digits = String(formPhone || '').replace(/\D/g, '').slice(-10);
+    if (digits.length === 10) {
+      const k = `gemrishi:formlead:${digits}`;
+      await redisCommand(`/set/${encodeURIComponent(k)}/${encodeURIComponent(grId)}/EX/${30 * 86400}/NX`);
+      const owner = (await redisCommand(`/get/${encodeURIComponent(k)}`))?.result;
+      if (owner && owner !== grId) {
+        await redisCommand(`/set/${encodeURIComponent(`gemrishi:handoff:alias:${grId}`)}/${encodeURIComponent(owner)}/EX/${30 * 86400}`);
+        return owner;
+      }
+      return '';
+    }
+    return (await redisCommand(`/get/${encodeURIComponent(`gemrishi:handoff:alias:${grId}`)}`))?.result || '';
+  } catch (err) {
+    console.error('[handoff] form-lead dedupe lookup failed:', err.message);
+    return '';
+  }
+}
+
 async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, intent = '', trigger = '', extra = {} }) {
   try {
     // 2026-10-20 (Ravi): budget routing for WhatsApp AND Instagram -
@@ -411,7 +436,8 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
       if (leadPhone) runInBackground(metaTracking.leadSubmitted({ phone: leadPhone, budget: budgetText, productInterest: result?.productInterest || '' }));
     }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
-    const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText }, { escalateToNeel });
+    const dedupeKey = await formLeadDedupeKey(identity?.grId || '', extra.formPhone);
+    const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText, dedupeKey }, { escalateToNeel });
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
       customerName: result?.customerName || identity?.knownName || '',
@@ -422,6 +448,7 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
       reason: result?.escalate ? result?.escalateReason || '' : '',
       trigger,
       ...extra,
+      dedupeKey,
       // 2026-10-21: extra.route (e.g. 'sales' for form leads) must not override
       // the budget routing decided above.
       route,
@@ -1389,6 +1416,7 @@ async function handleMessage(event) {
   if (formRef) {
     trigger = trigger || (formRef.new ? 'Meta ad form lead - gemologist to call today' : '');
     extra.route = 'sales';
+    if (parsedForm?.phone) extra.formPhone = parsedForm.phone;
     if (parsedForm) extra.productInterest = [parsedForm.requirement, parsedForm.purpose].filter(Boolean).join(' / ');
     if (!formRef.new && formLead.looksLikePreference(messageText)) extra.preference = messageText.slice(0, 200);
   }
@@ -1500,3 +1528,4 @@ module.exports._WHATSAPP_SHORT_NOTE = WHATSAPP_SHORT_NOTE;
 module.exports._withForwardedLine = withForwardedLine;
 module.exports._appendWorkingHoursNote = appendWorkingHoursNote;
 module.exports._adContextNote = adContextNote;
+module.exports._formLeadDedupeKey = formLeadDedupeKey;
