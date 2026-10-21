@@ -600,6 +600,8 @@ function whatsappEntrySignal(event, messageText) {
   const meta = { ...(c.metadata || {}), ...(m.metadata || {}), ...((event && event.metadata) || {}) };
   if (meta.referral || meta.ctwa_clid || meta.ctwa_source_id || m.referral || event?.referral) return 'meta_ad';
   if (formLead.isFormLead(messageText)) return 'meta_form';
+  // 2026-10-21 (Ravi): comment customers are told to WhatsApp "INSTA" to 220.
+  if (/\b(insta|instagram)\b/i.test(String(messageText || ''))) return 'comment_invite';
   return '';
 }
 function onlyAdsAndInstaOn() {
