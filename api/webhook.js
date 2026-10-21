@@ -786,6 +786,9 @@ async function handleEvent(event) {
             if (sale.error === 'phone') await reply('Customer ka 10 digit number bhi likhiye, jaise: sold 9876543210 45000');
             else if (sale.error === 'amount') await reply(`Amount bhi likhiye, jaise: sold ${sale.phone} 45000`);
             else {
+              // Mark the internal lead tracker as sold from the staff-confirmed sale command.
+              try { await require('../lib/leadTracker').recordSale(sale.phone, sale.amount, handoff.ROUTES[staffRoute].person); }
+              catch (trackerErr) { console.error('[sale] lead tracker update failed:', trackerErr.message); }
               const r = await metaTracking.purchase({ phone: sale.phone, amount: sale.amount, reportedBy: handoff.ROUTES[staffRoute].person });
               await reply(r.sent ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. Meta ko bata diya.` : `Sale note nahi ho paayi (${String(r.reason || '').slice(0, 80)}). Ravi ko bata dijiye.`);
             }
