@@ -401,6 +401,9 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
       reason: result?.escalate ? result?.escalateReason || '' : '',
       trigger,
       ...extra,
+      // 2026-10-21: extra.route (e.g. 'sales' for form leads) must not override
+      // the budget routing decided above.
+      route,
     });
     if (q.queued) scheduleFlush();
     return q;
