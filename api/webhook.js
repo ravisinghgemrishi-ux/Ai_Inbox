@@ -440,6 +440,17 @@ function safetyNetResult(message, err) {
 }
 
 // Decide whether this turn should hand the customer to a person.
+// 2026-10-21 (Ravi): "inform the customer their requirements are shared with
+// the team". Skipped when the reply already says the team will follow up, or
+// the customer was already told in this chat.
+function withForwardedLine(reply, { trigger = '', existingMemory = '', hindi = false, now = new Date() } = {}) {
+  const text = String(reply || '').trim();
+  if (!trigger || !text) return text;
+  if (callWindow.FORWARDED_MARKER.test(text) || callWindow.FORWARDED_MARKER.test(String(existingMemory || ''))) return text;
+  if (handoff.promisesTeamFollowUp(text)) return text;
+  return `${text}\n\n${callWindow.forwardedLine(hindi, now)}`;
+}
+
 function handoffTrigger({ result, identity, inviteAnswer, cta, isComment }) {
   const phone = result?.customerPhone || identity?.knownPhone || '';
   if (result?.escalate) return 'needs a person (escalation)';
@@ -1340,6 +1351,22 @@ async function handleMessage(event) {
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
+  // FIX 6 / 8 / 15: one handoff per customer, to the right person.
+  // (Worked out before sending so the customer can be told about it.)
+  let trigger = handoffTrigger({ result, identity, inviteAnswer, cta, isComment: false });
+  const extra = {};
+  if (formRef) {
+    trigger = trigger || (formRef.new ? 'Meta ad form lead - gemologist to call today' : '');
+    extra.route = 'sales';
+    if (parsedForm) extra.productInterest = [parsedForm.requirement, parsedForm.purpose].filter(Boolean).join(' / ');
+    if (!formRef.new && formLead.looksLikePreference(messageText)) extra.preference = messageText.slice(0, 200);
+  }
+  if (aiContext.intent.intent === 'b2b_inquiry') { extra.route = 'neel'; trigger = trigger || 'B2B / wholesale enquiry'; }
+  if (callWindow.looksLikeCallRequest(messageText)) { extra.keySuffix = 'call'; trigger = 'CUSTOMER ASKED FOR A CALL - please call them'; }
+  // 2026-10-21 (Ravi): tell the customer their requirement went to the team
+  // (any time of day - after hours with the office timing). Once per chat.
+  result = { ...result, reply: withForwardedLine(result.reply, { trigger, existingMemory, hindi: dmHindi }) };
+
   let stoppedForHuman = false;
   if (accountId && result.reply) {
     try {
@@ -1409,17 +1436,6 @@ async function handleMessage(event) {
     });
   }
 
-  // FIX 6 / 8 / 15: one handoff per customer, to the right person.
-  let trigger = handoffTrigger({ result, identity, inviteAnswer, cta, isComment: false });
-  const extra = {};
-  if (formRef) {
-    trigger = trigger || (formRef.new ? 'Meta ad form lead - gemologist to call today' : '');
-    extra.route = 'sales';
-    if (parsedForm) extra.productInterest = [parsedForm.requirement, parsedForm.purpose].filter(Boolean).join(' / ');
-    if (!formRef.new && formLead.looksLikePreference(messageText)) extra.preference = messageText.slice(0, 200);
-  }
-  if (aiContext.intent.intent === 'b2b_inquiry') { extra.route = 'neel'; trigger = trigger || 'B2B / wholesale enquiry'; }
-  if (callWindow.looksLikeCallRequest(messageText)) { extra.keySuffix = 'call'; trigger = 'CUSTOMER ASKED FOR A CALL - please call them'; }
   if (trigger) {
     await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, intent: aiContext.intent.intent, trigger, extra });
   }
@@ -1450,3 +1466,4 @@ module.exports._contactNumberFor = contactNumberFor;
 module.exports._conversationAdSignal = conversationAdSignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;
 module.exports._WHATSAPP_SHORT_NOTE = WHATSAPP_SHORT_NOTE;
+module.exports._withForwardedLine = withForwardedLine;
