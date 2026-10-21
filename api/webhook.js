@@ -1499,6 +1499,25 @@ async function handleMessage(event) {
   if (trigger) {
     await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, conversationId, intent: aiContext.intent.intent, trigger, extra });
   }
+
+  // Report only a real, sales-qualified WhatsApp handoff as LeadSubmitted.
+  // Never send a customer's budget as conversion revenue; metaTracking omits
+  // value/currency for this event. Support/complaint cases are not leads.
+  const supportCaseForMeta = aiContext.intent.intent === 'support_issue' ||
+    /return|refund|replace|exchange|damaged|wrong item|complaint/i.test(String(result.escalateReason || ''));
+  if (platform === 'whatsapp' && trigger && ['HOT', 'WARM'].includes(String(result.leadStatus || '').toUpperCase()) && !supportCaseForMeta) {
+    try {
+      const metaResult = await metaTracking.leadSubmitted({
+        phone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || '',
+        conversationId,
+        productInterest: result.productInterest || aiContext.product || extra.productInterest || '',
+      });
+      console.log('[meta] qualified lead conversion outcome', JSON.stringify({ sent: metaResult.sent, reason: metaResult.reason || '', traceId: metaResult.traceId || '' }));
+    } catch (err) {
+      // Conversion tracking must never break customer replies or lead handoff.
+      console.error('[meta] qualified lead conversion threw:', err.message);
+    }
+  }
 }
 
 function inboundSafeId(event) {
