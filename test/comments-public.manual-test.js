@@ -61,3 +61,14 @@ const wh = require('../api/webhook.js');
   assert.ok(n.reply.includes('nelam-158'), 'earlier link kept');
   console.log('wa-note/link tests passed');
 }
+
+// 2026-10-21 09:00 check
+{
+  const wh4 = require('../api/webhook.js');
+  const t = wh4._appendWorkingHoursNote("Pitambari Neelam is lovely.\n\nI'll confirm the exact current price with the team and get back to you.", 'peetambari 4-5 ratti', '', { customerPhone: '+91' }, 'whatsapp', 'whatsapp');
+  assert.ok(!/confirm the exact current price/.test(t) && /shared your requirements/.test(t), t);
+  const n = wh4._adContextNote({ metadata: { referral: { headline: 'Kashmir Blue Sapphire', body: 'Certified natural Neelam', source_url: 'https://fb.me/x' } } });
+  assert.ok(/AD CONTEXT/.test(n) && /Kashmir Blue Sapphire/.test(n));
+  assert.strictEqual(wh4._adContextNote({ metadata: { referral: { ctwa_clid: 'x' } } }), '');
+  console.log('dup-line/ad-context tests passed');
+}
