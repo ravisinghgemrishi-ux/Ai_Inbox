@@ -1,5 +1,12 @@
 {
   "crons": [
-    { "path": "/api/daily-alert", "schedule": "30 13 * * *" }
+    {
+      "path": "/api/daily-alert",
+      "schedule": "30 13 * * *"
+    },
+    {
+      "path": "/api/lead-tracker-daily",
+      "schedule": "30 14 * * *"
+    }
   ]
 }
