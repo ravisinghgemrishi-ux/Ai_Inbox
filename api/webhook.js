@@ -423,7 +423,7 @@ async function formLeadDedupeKey(grId, formPhone) {
   }
 }
 
-async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, intent = '', trigger = '', extra = {} }) {
+async function queueHandoff({ result, identity, platform, contact, memoryScope, memoryId, conversationId = '', intent = '', trigger = '', extra = {} }) {
   try {
     // 2026-10-20 (Ravi): budget routing for WhatsApp AND Instagram -
     // problems / B2B / 50k+ -> Neel; under 50k or unknown -> Yogesh and
@@ -433,7 +433,7 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     // only gets Meta-ad / Meta-form chats). Once per customer; background.
     if (String(platform).toLowerCase().includes('whatsapp')) {
       const leadPhone = result?.customerPhone || identity?.knownPhone || '';
-      if (leadPhone) runInBackground(metaTracking.leadSubmitted({ phone: leadPhone, budget: budgetText, productInterest: result?.productInterest || '' }));
+      if (leadPhone) runInBackground(metaTracking.leadSubmitted({ phone: leadPhone, conversationId, budget: budgetText, productInterest: result?.productInterest || '' }));
     }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const dedupeKey = await formLeadDedupeKey(identity?.grId || '', extra.formPhone);
@@ -1497,7 +1497,7 @@ async function handleMessage(event) {
   }
 
   if (trigger) {
-    await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, intent: aiContext.intent.intent, trigger, extra });
+    await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, conversationId, intent: aiContext.intent.intent, trigger, extra });
   }
 }
 
