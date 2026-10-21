@@ -279,7 +279,7 @@ function addStoneFromChat(base, messageText, existingMemory) {
   return base;
 }
 
-async function buildAIContext(messageText, platform, existingMemory, postCaption = '') {
+async function buildAIContext(messageText, platform, existingMemory, postCaption = '', type = 'dm') {
   const intent = classifyIntent(messageText);
   const product = extractProduct(messageText);
   const live = await lookupLiveProduct(productQueryWithContext(messageText, product, existingMemory));
@@ -298,6 +298,7 @@ async function buildAIContext(messageText, platform, existingMemory, postCaption
   const languageNote = detectReplyLanguageNote(messageText, existingMemory, { platform });
   if (languageNote) parts.push(languageNote);
   if (postCaption) parts.push(`POST CONTEXT: ${postCaption}`);
+  parts.push(`CONTACT NUMBER: if you give the customer a WhatsApp/phone number to reach GemRishi or for a consultation, give ${contactNumberFor(platform, type)} (and no other number, except a showroom's own number when giving its address).`);
   return { contextText: parts.join('\n\n'), liveProductData: formatLiveProductData(live), intent, product, live };
 }
 
@@ -343,15 +344,24 @@ function extractFallbackPhone(text) {
 // out as a general "reach us directly" line for an escalated customer, or
 // tell me which number you'd rather use instead.
 const GEMRISHI_CONTACT_NUMBER = '+91 98179 75978';
+// 2026-10-21 (Ravi): the number Mannat gives a customer depends on where they
+// are: Instagram DMs -> Mannat Chawla's +91 98179 75978; everything else
+// (WhatsApp, Instagram/Facebook comments, Facebook, reviews) -> +91 74969 97220.
+const IG_DM_CONTACT_NUMBER = '+91 98179 75978';
+const DEFAULT_CONTACT_NUMBER = '+91 74969 97220';
+function contactNumberFor(platform = '', type = '') {
+  const p = String(platform).toLowerCase();
+  return p.includes('instagram') && type !== 'comment' ? IG_DM_CONTACT_NUMBER : DEFAULT_CONTACT_NUMBER;
+}
 
 const WORKING_HOURS_NOTE_EN = "We've noted your query and shared it with the concerned team member - they'll personally get back to you between 10 AM - 8 PM (all 7 days, Monday to Sunday).";
 const WORKING_HOURS_NOTE_HI = 'Aapki query note kar li hai aur concerned team member ko bhej di hai - wo aapse 10 AM se 8 PM ke beech (Monday se Sunday, saare 7 din) khud personally contact karenge.';
 const ASK_NAME_PHONE_NOTE_EN = "If you haven't already, please share your name and contact number so the team can reach you directly.";
 const ASK_NAME_PHONE_NOTE_HI = 'Agar aapne abhi tak apna naam aur contact number nahi diya hai, toh please share kar dijiye taaki team aapse jaldi contact kar sake.';
-const CONTACT_SHARE_NOTE_EN = `You can also reach us directly at ${GEMRISHI_CONTACT_NUMBER}.`;
-const CONTACT_SHARE_NOTE_HI = `Aap humein seedha ${GEMRISHI_CONTACT_NUMBER} par bhi contact kar sakte hain.`;
+const contactShareNoteEn = (n) => `You can also reach us directly at ${n}.`;
+const contactShareNoteHi = (n) => `Aap humein seedha ${n} par bhi contact kar sakte hain.`;
 
-function appendWorkingHoursNote(reply, message, existingMemory, result, platform = '') {
+function appendWorkingHoursNote(reply, message, existingMemory, result, platform = '', type = '') {
   if (!reply) return reply;
   // 2026-10-04 (audit): this long note was appended to EVERY escalated reply,
   // so the same paragraph repeated down the chat. Now once per conversation.
@@ -366,7 +376,8 @@ function appendWorkingHoursNote(reply, message, existingMemory, result, platform
   } else if (!result?.customerPhone) {
     parts.push(isHindi ? 'Agar aap apna contact number share kar dein toh team aapse jaldi contact kar payegi.' : 'If you could share your contact number, the team can reach you quickly.');
   }
-  parts.push(isHindi ? CONTACT_SHARE_NOTE_HI : CONTACT_SHARE_NOTE_EN);
+  const contactNo = contactNumberFor(platform, type);
+  parts.push(isHindi ? contactShareNoteHi(contactNo) : contactShareNoteEn(contactNo));
   const note = parts.join(' ');
   if (reply.includes(note)) return reply; // never duplicate if already present
   return `${reply}\n\n${note}`;
@@ -905,7 +916,7 @@ async function handleComment(event) {
   try {
     existingMemory = await loadContext('comment', memoryId);
     identity = await prepareInbound({ platform, event, messageText: commentText, platformUserId: comment.author?.id, handle: authorHandle });
-    aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption);
+    aiContext = await buildAIContext(commentText, platform, existingMemory, postCaption, 'comment');
     if (identity?.contextNote) aiContext.contextText += `\n\n${identity.contextNote}`;
     aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: commentText, knownPhone: identity?.knownPhone || '' })}`;
     const commentCallNote = callWindow.immediateCallNote(commentText, looksHinglishOrHindi(commentText));
@@ -919,7 +930,7 @@ async function handleComment(event) {
   }
   result = mergeEscalation(result, commentText, false);
   result = { ...result, reply: guards.cleanReply({ reply: result.reply, memory: existingMemory, message: commentText, knownPhone: result.customerPhone || identity?.knownPhone || '', isFirstReply: !existingMemory }) };
-  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result) };
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, commentText, existingMemory, result, platform, 'comment') };
   const cta = await addHandoffCta({
     identity, reply: result.reply, messageText: commentText, existingMemory, memoryScope: 'comment', memoryId,
     platformUserId: comment.author?.id || authorHandle, commentId, postId, isComment: true,
@@ -1289,7 +1300,7 @@ async function handleMessage(event) {
   if (!inviteAnswer?.result) {
     result = { ...result, reply: guards.cleanReply({ reply: result.reply, memory: existingMemory, message: messageText, knownPhone: result.customerPhone, isFirstReply: !ownMemory }) };
   }
-  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result, platform) };
+  if (result.escalate) result = { ...result, reply: appendWorkingHoursNote(result.reply, messageText, existingMemory, result, platform, 'dm') };
   const cta = formRef ? { reply: result.reply, handoffId: '' } : await addHandoffCta({
     identity, reply: result.reply, messageText, existingMemory, memoryScope: 'conversation', memoryId,
     conversationId, platformUserId: conversation.participantId || senderHandle, isComment: false,
@@ -1414,5 +1425,6 @@ module.exports._productQueryWithContext = productQueryWithContext;
 module.exports._handoffTrigger = handoffTrigger;
 module.exports._shouldDmCommenter = shouldDmCommenter;
 module.exports._whatsappEntrySignal = whatsappEntrySignal;
+module.exports._contactNumberFor = contactNumberFor;
 module.exports._conversationAdSignal = conversationAdSignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;
