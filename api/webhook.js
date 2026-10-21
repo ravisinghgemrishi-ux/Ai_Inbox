@@ -5,6 +5,7 @@ const {
   replyToReview,
   sendTypingIndicator,
   sendConversationMessage,
+  listInboxConversations,
   sendPrivateReply,
   messageReplyIdempotencyKey,
 } = require('../lib/zernioClient');
@@ -576,6 +577,34 @@ function whatsappEntrySignal(event, messageText) {
 function onlyAdsAndInstaOn() {
   return String(process.env.WHATSAPP_ONLY_ADS_AND_INSTA || 'on').toLowerCase() !== 'off';
 }
+// Meta's default Click-to-WhatsApp greeting (pre-typed in the customer's box).
+const CTWA_DEFAULT_GREETING = /^hello!?\s*can i get more info on this\??$/i;
+
+function adMetaFrom(conv) {
+  const md = (conv && conv.metadata) || {};
+  return md.ctwa_clid || md.ctwa_source_id || md.ctwa_source_type === 'ad';
+}
+
+async function conversationAdSignal(event, { waits = [0, 3000, 5000] } = {}) {
+  const accId = event?.account?.accountId || event?.account?.id || '';
+  const convId = String(event?.conversation?.id || event?.conversation?.conversationId || '');
+  const sender = identityBridge.extractWhatsAppSender(event);
+  const phone = sender?.kind === 'phone' ? sender.id : '';
+  const text = String(event?.message?.text || event?.message?.message || '').trim();
+  for (const ms of waits) {
+    if (ms) await new Promise((r) => setTimeout(r, ms));
+    try {
+      const page = await listInboxConversations({ apiKey: process.env.ZERNIO_API_KEY, accountId: accId, platform: 'whatsapp', status: '', limit: 30, sortOrder: 'desc' });
+      const list = Array.isArray(page?.data) ? page.data : (Array.isArray(page?.conversations) ? page.conversations : []);
+      const conv = list.find((c) => String(c.id || c._id) === convId || (phone && String(c.participantId || '').replace(/\D/g, '') === phone));
+      if (conv && adMetaFrom(conv)) return 'meta_ad';
+    } catch (err) { console.error('[wa-gate] conversation lookup failed:', err.message); }
+  }
+  // Last resort: Meta's default ad greeting is only typed by ad clicks.
+  if (CTWA_DEFAULT_GREETING.test(text)) return 'meta_ad_greeting';
+  return '';
+}
+
 async function whatsappChatAllowed(event) {
   if (!onlyAdsAndInstaOn()) return true;
   const conversationId = event?.conversation?.id || event?.conversation?.conversationId || '';
@@ -586,7 +615,11 @@ async function whatsappChatAllowed(event) {
     if (got?.result) return true;
   } catch (err) { console.error('[wa-gate] redis read failed:', err.message); }
   const text = String(event?.message?.text || event?.message?.message || '');
-  const signal = whatsappEntrySignal(event, text);
+  let signal = whatsappEntrySignal(event, text);
+  // 2026-10-21: Meta's ad tag (ctwa_*) lands on the Zernio conversation ~3s
+  // AFTER the first message arrives, so it is missing from the webhook. Look
+  // it up on the conversation, waiting a few seconds if needed.
+  if (!signal) signal = await conversationAdSignal(event);
   if (!signal) {
     console.log('[wa-gate] not a Meta ad / form chat - Mannat stays silent:', conversationId);
     return false;
@@ -1364,4 +1397,5 @@ module.exports._productQueryWithContext = productQueryWithContext;
 module.exports._handoffTrigger = handoffTrigger;
 module.exports._shouldDmCommenter = shouldDmCommenter;
 module.exports._whatsappEntrySignal = whatsappEntrySignal;
+module.exports._conversationAdSignal = conversationAdSignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;

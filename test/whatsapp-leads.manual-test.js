@@ -55,3 +55,23 @@ assert.strictEqual(sig('Hello', { conversation: { metadata: { ctwa_clid: 'Ab12' 
 assert.strictEqual(sig('Full name: Ravi\nPhone number: 9999999999'), 'meta_form');
 for (const t of ['Hi', 'I need opal 5 ratti', 'bhai kal milte hain', 'Good morning', 'INSTA', 'instagram se aaya hoon']) assert.strictEqual(sig(t), '', t);
 console.log('220 gate tests passed');
+
+// 2026-10-21: ad tag arrives on the conversation a few seconds after the message.
+(async () => {
+  process.env.ZERNIO_API_KEY = 'k';
+  let calls = 0;
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    calls += 1;
+    const tagged = calls >= 2; // first lookup: not yet tagged; second: tagged
+    const data = [{ id: 'conv1', participantId: '918708512972', metadata: tagged ? { ctwa_source_type: 'ad', ctwa_clid: 'x' } : {} }];
+    return { ok: true, json: async () => ({ data }) };
+  };
+  const ev = { account: { accountId: 'acc220' }, conversation: { id: 'conv1', participantPhone: '918708512972' }, message: { text: 'Kon sa rudraksha' } };
+  assert.strictEqual(await whk._conversationAdSignal(ev, { waits: [0, 1, 1] }), 'meta_ad');
+  calls = -100; // never tagged
+  assert.strictEqual(await whk._conversationAdSignal({ ...ev, message: { text: 'Hello! Can I get more info on this?' } }, { waits: [0, 1] }), 'meta_ad_greeting');
+  assert.strictEqual(await whk._conversationAdSignal({ ...ev, message: { text: 'bhai kal milte hain' } }, { waits: [0, 1] }), '');
+  global.fetch = realFetch;
+  console.log('Late ad-tag tests passed');
+})().catch((e) => { console.error(e); process.exit(1); });
