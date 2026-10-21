@@ -437,7 +437,7 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const dedupeKey = await formLeadDedupeKey(identity?.grId || '', extra.formPhone);
-    const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText, dedupeKey }, { escalateToNeel });
+    const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText, dedupeKey, productInterest: [result?.productInterest, extra.productInterest].filter(Boolean).join(' / ') }, { escalateToNeel });
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
       customerName: result?.customerName || identity?.knownName || '',
@@ -659,7 +659,8 @@ function whatsappEntrySignal(event, messageText) {
 // The ad's own headline/text comes with the first message - tell her.
 function adContextNote(event) {
   const meta = { ...((event?.conversation || {}).metadata || {}), ...((event?.message || {}).metadata || {}), ...((event && event.metadata) || {}) };
-  const ref = meta.referral || event?.message?.referral || event?.referral;
+  // Zernio also stores the ad headline on the conversation as ctwa_headline.
+  const ref = meta.referral || event?.message?.referral || event?.referral || (meta.ctwa_headline ? { headline: meta.ctwa_headline, source_url: meta.ctwa_source_url } : null);
   if (!ref || typeof ref !== 'object') return '';
   const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 300);
   const parts = [clean(ref.headline), clean(ref.body)].filter(Boolean);
