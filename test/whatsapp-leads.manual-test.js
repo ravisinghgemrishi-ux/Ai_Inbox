@@ -53,6 +53,7 @@ const sig = (text, extra = {}) => whk._whatsappEntrySignal({ message: { text, ..
 assert.strictEqual(sig('Hi', { message: { metadata: { referral: { source_type: 'ad' } } } }), 'meta_ad');
 assert.strictEqual(sig('Hello', { conversation: { metadata: { ctwa_clid: 'Ab12' } } }), 'meta_ad');
 assert.strictEqual(sig('Full name: Ravi\nPhone number: 9999999999'), 'meta_form');
+assert.strictEqual(whk._whatsappEntrySignal({ message: { text: 'x' }, conversation: {}, metadata: { referral: { source_type: 'ad', ctwa_clid: 'Afg' } } }, 'x'), 'meta_ad', 'top-level event.metadata.referral');
 for (const t of ['Hi', 'I need opal 5 ratti', 'bhai kal milte hain', 'Good morning', 'INSTA', 'instagram se aaya hoon']) assert.strictEqual(sig(t), '', t);
 console.log('220 gate tests passed');
 
