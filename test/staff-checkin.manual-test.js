@@ -20,6 +20,7 @@ global.fetch = async (url, opts = {}) => {
     else if (cmd === 'expire' || cmd === 'incr') result = 1;
     return { ok: true, json: async () => ({ result }) };
   }
+  if ((opts.method || 'GET') === 'GET') return { ok: true, json: async () => ({ messages: [] }) }; // message history lookup
   const body = JSON.parse(opts.body || '{}');
   const isTemplate = Boolean(body.templateName); const isDirect = body.category === 'utility' && !u.pathname.includes('/messages');
   if ((isTemplate && !templateOk) || (isDirect && !directOk)) return { ok: false, status: 400, text: async () => 'not allowed' };
