@@ -9,7 +9,11 @@ function authorised(req) {
 module.exports = async (req, res) => {
   if (!authorised(req)) return res.status(401).json({ error: 'unauthorised' });
   try {
-    const result = await require('../lib/leadTracker').runDailySummary();
+    const tracker = require('../lib/leadTracker');
+    // Daily fallback check for deployments without a delayed-job provider.
+    const reminders = await tracker.runHourly();
+    const summary = await tracker.runDailySummary();
+    const result = { reminders, summary };
     console.log('[lead-tracker-daily]', JSON.stringify(result));
     return res.status(200).json(result);
   } catch (err) {
