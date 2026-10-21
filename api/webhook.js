@@ -486,8 +486,20 @@ module.exports = async (req, res) => {
   }
 
   const inboundKey = stableInboundKey(body, rawBody);
+  // 2026-10-21: one-off replay of specific events (REPLAY_EVENT_IDS, comma
+  // separated) - lets a fixed bug's missed messages be redelivered once.
+  // The 3 Meta-ad chats missed on 21 Oct 2026 (ad tag bug) are listed here
+  // once; safe to leave (each replays at most once) and remove later.
+  const replayIds = [
+    ...String(process.env.REPLAY_EVENT_IDS || '').split(','),
+    '9ece9442-1891-4150-8033-458161be64ed', 'dc1596a7-4446-42f7-af0f-6dd909e83d29', // Sandeep
+    '09da54e0-5c69-4b22-b593-e2266a490ee2', // chirayupandya41
+    'bef64e94-ce83-4398-aeb0-cd59ac0ec8c0', // Vartika
+  ].map((x) => x.trim()).filter(Boolean);
+  const isReplay = body?.id && replayIds.includes(String(body.id))
+    && await claimInbound(`replay:${body.id}`).catch(() => false);
   try {
-    const claimed = await claimInbound(inboundKey);
+    const claimed = isReplay ? true : await claimInbound(inboundKey);
     if (!claimed) {
       console.log('[webhook] ignored duplicate inbound action:', inboundKey);
       return res.status(200).json({ received: true, duplicate: true });
@@ -569,7 +581,9 @@ function mannatWhatsAppRepliesOn() {
 function whatsappEntrySignal(event, messageText) {
   const m = event?.message || {};
   const c = event?.conversation || {};
-  const meta = { ...(c.metadata || {}), ...(m.metadata || {}) };
+  // 2026-10-21: Zernio puts Meta's ad referral at the TOP level of the
+  // event (event.metadata.referral), not on the message or conversation.
+  const meta = { ...(c.metadata || {}), ...(m.metadata || {}), ...((event && event.metadata) || {}) };
   if (meta.referral || meta.ctwa_clid || meta.ctwa_source_id || m.referral || event?.referral) return 'meta_ad';
   if (formLead.isFormLead(messageText)) return 'meta_form';
   return '';
