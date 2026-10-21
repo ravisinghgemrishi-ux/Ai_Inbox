@@ -372,7 +372,10 @@ function appendWorkingHoursNote(reply, message, existingMemory, result, platform
   // shared with the team" message - and none if the reply already says when.
   if (platform === 'whatsapp') {
     if (callWindow.FORWARDED_MARKER.test(`${reply}\n${existingMemory || ''}`)) return reply;
-    return `${reply}\n\n${callWindow.forwardedLine(isHindi)}`;
+    // 2026-10-21 check: don't stack "I'll confirm the price with the team"
+    // AND "requirement shared with the team" - the second one covers it.
+    const trimmed = String(reply).replace(PRICE_CONFIRM_LINE, '').replace(/\n{3,}/g, '\n\n').trim() || reply;
+    return `${trimmed}\n\n${callWindow.forwardedLine(isHindi)}`;
   }
   const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
   // Only ask for what's actually missing (on WhatsApp the number is known).
@@ -447,6 +450,8 @@ function safetyNetResult(message, err) {
 }
 
 // Decide whether this turn should hand the customer to a person.
+const PRICE_CONFIRM_LINE = /\s*(I'll confirm the exact current price with the team and get back to you\.|Exact current price main team se confirm karke batati hoon\.)/g;
+
 // 2026-10-21 (Ravi): "inform the customer their requirements are shared with
 // the team". Skipped when the reply already says the team will follow up, or
 // the customer was already told in this chat.
@@ -622,6 +627,22 @@ function whatsappEntrySignal(event, messageText) {
   if (/\b(insta|instagram)\b/i.test(String(messageText || ''))) return 'comment_invite';
   return '';
 }
+// 2026-10-21 check: chats from Click-to-WhatsApp ads start with Meta's
+// "Hello! Can I get more info on this?" and Mannat asked "which product?".
+// The ad's own headline/text comes with the first message - tell her.
+function adContextNote(event) {
+  const meta = { ...((event?.conversation || {}).metadata || {}), ...((event?.message || {}).metadata || {}), ...((event && event.metadata) || {}) };
+  const ref = meta.referral || event?.message?.referral || event?.referral;
+  if (!ref || typeof ref !== 'object') return '';
+  const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const parts = [clean(ref.headline), clean(ref.body)].filter(Boolean);
+  const url = clean(ref.source_url || ref.sourceUrl);
+  if (!parts.length && !url) return '';
+  return `AD CONTEXT: this customer came from a Meta ad${parts.length ? ` - "${parts.join(' - ')}"` : ''}${url ? ` (${url})` : ''}. `
+    + 'If their message is generic (like "Can I get more info on this?"), assume they mean what this ad shows: answer about it directly '
+    + '(price/options from live data) instead of asking which product they want.';
+}
+
 function onlyAdsAndInstaOn() {
   return String(process.env.WHATSAPP_ONLY_ADS_AND_INSTA || 'on').toLowerCase() !== 'off';
 }
@@ -1263,6 +1284,8 @@ async function handleMessage(event) {
     const offHoursNote = callWindow.afterHoursNote(replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText));
     if (offHoursNote) aiContext.contextText += `\n\n${offHoursNote}`;
     if (platform === 'whatsapp') aiContext.contextText += `\n\n${WHATSAPP_SHORT_NOTE}`;
+    const adNote = adContextNote(event);
+    if (adNote) aiContext.contextText += `\n\n${adNote}`;
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
@@ -1476,3 +1499,4 @@ module.exports._commentDmPublicReply = commentDmPublicReply;
 module.exports._WHATSAPP_SHORT_NOTE = WHATSAPP_SHORT_NOTE;
 module.exports._withForwardedLine = withForwardedLine;
 module.exports._appendWorkingHoursNote = appendWorkingHoursNote;
+module.exports._adContextNote = adContextNote;
