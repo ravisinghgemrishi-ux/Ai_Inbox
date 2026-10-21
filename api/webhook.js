@@ -791,9 +791,14 @@ async function handleOutgoingDm(event) {
 // Which comments get a DM: Instagram by default (COMMENT_DM_PLATFORMS, comma
 // list; "off" disables). Pure emoji / praise comments and non-leads get only
 // the public reply - a DM for "🔥🔥" would feel like spam.
-// 2026-10-21 (Ravi): default is now OFF - comments are answered publicly.
+// 2026-10-21 (Ravi): keep WhatsApp chats short and simple.
+const WHATSAPP_SHORT_NOTE = 'WHATSAPP STYLE: keep it short and simple - at most 2 short blocks, under 40 words in total, plain everyday words, '
+  + 'one thing at a time and at most one question. A price or a product link is fine; no long explanations or lists.';
+
+// 2026-10-21 (Ravi): the private DM to Instagram commenters stays ON, and the
+// full answer is ALSO given publicly under the comment.
 function shouldDmCommenter({ platform, commentText, result }) {
-  const setting = String(process.env.COMMENT_DM_PLATFORMS || 'off').toLowerCase();
+  const setting = String(process.env.COMMENT_DM_PLATFORMS || 'instagram').toLowerCase();
   if (setting === 'off') return false;
   if (!setting.split(',').map((x) => x.trim()).includes(String(platform || '').toLowerCase())) return false;
   if (!/[\p{L}\p{N}]/u.test(String(commentText || ''))) return false; // emoji / stickers only
@@ -973,7 +978,9 @@ async function handleComment(event) {
       await sendPrivateReply({ apiKey: process.env.ZERNIO_API_KEY, postId, commentId, accountId, text: dmText });
       dmSent = true;
       await saveCommentDmSeed(authorHandle, commentText, dmText);
-      result = { ...result, dmReply: dmText, reply: commentDmPublicReply(commentText, existingMemory) };
+      // 2026-10-21 (Ravi): the public reply keeps the full answer (solve it
+      // under the comment); the DM is an extra private copy.
+      result = { ...result, dmReply: dmText };
     } catch (err) {
       console.error('[webhook] private reply (comment DM) failed - answering publicly instead:', err.message);
     }
@@ -1001,7 +1008,7 @@ async function handleComment(event) {
 
   await logLead({
     platform, contact: authorHandle, type: 'comment', message: commentText,
-    reply: sendError ? '(send failed, see notes)' : (dmSent ? `[DM] ${result.dmReply}\n[Public] ${result.reply}` : result.reply),
+    reply: sendError ? '(send failed, see notes)' : (dmSent ? `[Public + DM] ${result.reply}` : result.reply),
     leadStatus: result.leadStatus, productInterest: result.productInterest || aiContext.product,
     escalated: result.escalate || Boolean(sendError),
     notes: [result.escalateReason, `intent=${aiContext.intent.intent}`, aiContext.live.found ? 'live_product_data=found' : 'live_product_data=not_found', identityNotes(identity, cta.handoffId), result.modelTier ? `model=${result.modelTier}` : '', result.safetyNet ? 'safety_net_reply' : '', dmSent ? 'comment_dm_sent' : '', sendError].filter(Boolean).join(' | '),
@@ -1236,6 +1243,7 @@ async function handleMessage(event) {
     if (immediateCallNote) aiContext.contextText += `\n\n${immediateCallNote}`;
     const offHoursNote = callWindow.afterHoursNote(replyShouldBeHindi(messageText, existingMemory, { platform }) || looksHinglishOrHindi(messageText));
     if (offHoursNote) aiContext.contextText += `\n\n${offHoursNote}`;
+    if (platform === 'whatsapp') aiContext.contextText += `\n\n${WHATSAPP_SHORT_NOTE}`;
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
@@ -1441,3 +1449,4 @@ module.exports._whatsappEntrySignal = whatsappEntrySignal;
 module.exports._contactNumberFor = contactNumberFor;
 module.exports._conversationAdSignal = conversationAdSignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;
+module.exports._WHATSAPP_SHORT_NOTE = WHATSAPP_SHORT_NOTE;

@@ -9,7 +9,8 @@ const cc = require('../lib/crossChannel');
 const wh = require('../api/webhook.js');
 
 (async () => {
-  assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Blue sapphire price', result: { leadStatus: 'HOT' } }), 'no DM by default');
+  assert.ok(wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Blue sapphire price', result: { leadStatus: 'HOT' } }), 'private DM still sent');
+  assert.ok(/40 words/.test(wh._WHATSAPP_SHORT_NOTE));
   const identity = { grId: 'gr_test', channel: 'instagram' };
   const base = { identity, reply: 'Our 5 ratti Neelam is ₹45,000.', intent: 'price_query', leadStatus: 'HOT', isComment: true };
   // inviteState lives in Redis; without Redis the try/catch path returns unchanged,

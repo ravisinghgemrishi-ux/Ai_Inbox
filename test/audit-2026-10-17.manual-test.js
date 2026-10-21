@@ -50,9 +50,6 @@ console.log('All audit tests passed');
 // Comment -> DM (2026-10-17)
 const wh = require('../api/webhook.js');
 const lead = { leadStatus: 'WARM' };
-// 2026-10-21: comment DMs are off by default (answered publicly); these check the opt-in path.
-assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: lead }), 'default off');
-process.env.COMMENT_DM_PLATFORMS = 'instagram';
 assert.ok(wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: lead }));
 assert.ok(wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Blue sapphire price', result: { leadStatus: 'HOT' } }));
 assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: '🔥🔥', result: lead }), 'emoji only -> no DM');
@@ -60,7 +57,6 @@ assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Beautifu
 assert.ok(!wh._shouldDmCommenter({ platform: 'facebook', commentText: 'Pp', result: lead }), 'Facebook off by default');
 assert.ok(!wh._shouldDmCommenter({ platform: 'instagram', commentText: 'Pp', result: { leadStatus: 'NOT_A_LEAD' } }));
 assert.ok(/DM/.test(wh._commentDmPublicReply('Price batao')));
-delete process.env.COMMENT_DM_PLATFORMS;
 console.log('Comment-DM tests passed');
 
 // 2026-10-17 live bug: decimals must not split sentences
