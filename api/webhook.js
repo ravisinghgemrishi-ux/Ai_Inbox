@@ -791,8 +791,9 @@ async function handleOutgoingDm(event) {
 // Which comments get a DM: Instagram by default (COMMENT_DM_PLATFORMS, comma
 // list; "off" disables). Pure emoji / praise comments and non-leads get only
 // the public reply - a DM for "🔥🔥" would feel like spam.
+// 2026-10-21 (Ravi): default is now OFF - comments are answered publicly.
 function shouldDmCommenter({ platform, commentText, result }) {
-  const setting = String(process.env.COMMENT_DM_PLATFORMS || 'instagram').toLowerCase();
+  const setting = String(process.env.COMMENT_DM_PLATFORMS || 'off').toLowerCase();
   if (setting === 'off') return false;
   if (!setting.split(',').map((x) => x.trim()).includes(String(platform || '').toLowerCase())) return false;
   if (!/[\p{L}\p{N}]/u.test(String(commentText || ''))) return false; // emoji / stickers only
@@ -800,6 +801,15 @@ function shouldDmCommenter({ platform, commentText, result }) {
   if (['COLD', 'NOT_A_LEAD'].includes(result?.leadStatus)) return false;
   if (result?.safetyNet || result?.generationFailed) return false;
   return true;
+}
+
+// 2026-10-21 (Ravi): solve the question right under the comment.
+function commentAnswerNote(existingMemory = '') {
+  const repeat = /^Customer:/m.test(String(existingMemory || ''));
+  return 'PUBLIC COMMENT: answer the customer\'s question fully right here in the comment reply (2-3 short lines) - '
+    + 'give the price/details/link from the live product data if you have it. Do NOT tell them to DM, inbox or WhatsApp us; '
+    + 'the system adds the WhatsApp line itself when it is needed.'
+    + (repeat ? ' This customer has already commented here before - answer what they are asking now, do not repeat your earlier reply.' : '');
 }
 
 function commentDmPublicReply(commentText, existingMemory = '') {
@@ -923,6 +933,7 @@ async function handleComment(event) {
     aiContext.contextText += `\n\n${guards.contextNotes({ memory: existingMemory, message: commentText, knownPhone: identity?.knownPhone || '' })}`;
     const commentCallNote = callWindow.immediateCallNote(commentText, looksHinglishOrHindi(commentText));
     if (commentCallNote) aiContext.contextText += `\n\n${commentCallNote}`;
+    aiContext.contextText += `\n\n${commentAnswerNote(existingMemory)}`;
     result = await generateReply({ platform, type: 'comment', message: commentText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData, intent: aiContext.intent.intent });
   } catch (err) {
     // SAFETY NET (2026-10-04): never leave a customer unanswered because
