@@ -46,3 +46,18 @@ const wh = require('../api/webhook.js');
   assert.strictEqual(wh2._withForwardedLine('Great choice.', { trigger: 'x', existingMemory: "Mannat: I've shared your requirements with our team ✅", now: day }), 'Great choice.', 'only once per chat');
   console.log('forwarded-line tests passed');
 }
+
+// 2026-10-21 check: WhatsApp escalations get the one-line note, not the long paragraph
+{
+  const wh3 = require('../api/webhook.js');
+  const t = wh3._appendWorkingHoursNote('Hamare gemologist aapko call karenge.', 'Purkhraj 5 ratti', '', { customerName: 'Dharmesh', customerPhone: '+917840095104' }, 'whatsapp', 'whatsapp');
+  assert.ok(/team ko share kar di hai|shared your requirements/.test(t) && !/7 din|98179|74969/.test(t), t);
+  const again = wh3._withForwardedLine(t, { trigger: 'x' });
+  assert.strictEqual(again, t, 'not added twice');
+  const ig = wh3._appendWorkingHoursNote('ok', 'price?', '', {}, 'instagram', 'dm');
+  assert.ok(/10 AM - 8 PM/.test(ig), 'Instagram keeps the full note');
+  const r = require('../lib/replyEngine');
+  const n = r._normalizeResult({ reply: 'Loose: https://gemrishi.com/product/blue-sapphire-5-95-carats-nelam-158', leadStatus: 'HOT' }, '{"products":[]}', 'Loose lena', 'RECENT CONVERSATION:\nMannat: https://gemrishi.com/product/blue-sapphire-5-95-carats-nelam-158');
+  assert.ok(n.reply.includes('nelam-158'), 'earlier link kept');
+  console.log('wa-note/link tests passed');
+}

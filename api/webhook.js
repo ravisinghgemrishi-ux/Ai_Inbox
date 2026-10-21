@@ -367,6 +367,13 @@ function appendWorkingHoursNote(reply, message, existingMemory, result, platform
   // so the same paragraph repeated down the chat. Now once per conversation.
   if (/10 AM - 8 PM|10 AM se 8 PM/.test(String(existingMemory || ''))) return reply;
   const isHindi = replyShouldBeHindi(message, existingMemory, { platform }) || looksHinglishOrHindi(message);
+  // 2026-10-21 (Ravi: keep WhatsApp short): on WhatsApp the long paragraph
+  // (number to call, 7 days...) is replaced by the one-line "requirement
+  // shared with the team" message - and none if the reply already says when.
+  if (platform === 'whatsapp') {
+    if (callWindow.FORWARDED_MARKER.test(`${reply}\n${existingMemory || ''}`)) return reply;
+    return `${reply}\n\n${callWindow.forwardedLine(isHindi)}`;
+  }
   const parts = [isHindi ? WORKING_HOURS_NOTE_HI : WORKING_HOURS_NOTE_EN];
   // Only ask for what's actually missing (on WhatsApp the number is known).
   if (!result?.customerName && !result?.customerPhone) {
@@ -804,7 +811,8 @@ async function handleOutgoingDm(event) {
 // the public reply - a DM for "🔥🔥" would feel like spam.
 // 2026-10-21 (Ravi): keep WhatsApp chats short and simple.
 const WHATSAPP_SHORT_NOTE = 'WHATSAPP STYLE: keep it short and simple - at most 2 short blocks, under 40 words in total, plain everyday words, '
-  + 'one thing at a time and at most one question. A price or a product link is fine; no long explanations or lists.';
+  + 'one thing at a time and at most one question. A price or a product link is fine; no long explanations or lists. '
+  + 'The customer is already chatting on WhatsApp - never ask whether they prefer WhatsApp chat or a call on WhatsApp, and never give them a number to WhatsApp.';
 
 // 2026-10-21 (Ravi): the private DM to Instagram commenters stays ON, and the
 // full answer is ALSO given publicly under the comment.
@@ -1467,3 +1475,4 @@ module.exports._conversationAdSignal = conversationAdSignal;
 module.exports._commentDmPublicReply = commentDmPublicReply;
 module.exports._WHATSAPP_SHORT_NOTE = WHATSAPP_SHORT_NOTE;
 module.exports._withForwardedLine = withForwardedLine;
+module.exports._appendWorkingHoursNote = appendWorkingHoursNote;
