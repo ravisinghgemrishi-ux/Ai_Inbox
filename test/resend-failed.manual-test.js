@@ -9,6 +9,8 @@ const msgs = [
   { id: 'm3', direction: 'outgoing', deliveryStatus: 'failed', message: '🔔 New lead for Yogesh (Mannat AI)\nName: B', createdAt: now },
   { id: 'm2', direction: 'outgoing', deliveryStatus: 'read', message: '🔔 New lead for Yogesh (Mannat AI)\nName: OK', createdAt: now },
   { id: 'm1', direction: 'outgoing', deliveryStatus: 'failed', message: '🔔 New lead for Yogesh (Mannat AI)\nName: A', createdAt: now },
+  { id: 'm4', direction: 'outgoing', deliveryStatus: 'failed', message: '🔔 New lead for Yogesh (Mannat AI)\nName: C\nPhone: +919811259585', createdAt: now },
+  { id: 'm5', direction: 'outgoing', deliveryStatus: 'read', message: '8) Rajesh Batra - +919811259585 - Faridabad', createdAt: now },
   { id: 'm0', direction: 'outgoing', deliveryStatus: 'failed', message: '🔔 New lead old', createdAt: '2026-01-01T00:00:00Z' },
 ];
 global.fetch = async (url, opts = {}) => {
