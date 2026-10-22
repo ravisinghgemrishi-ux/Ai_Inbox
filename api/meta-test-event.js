@@ -11,14 +11,14 @@ module.exports = async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
   const testCode = String(process.env.META_CAPI_TEST_EVENT_CODE || '').trim();
-  const authToken = String(process.env.META_CAPI_TEST_TRIGGER_TOKEN || '').trim();
-  if (!testCode || !authToken || !process.env.META_CAPI_DATASET_ID || !process.env.META_CAPI_ACCESS_TOKEN) {
+  if (!testCode || !process.env.META_CAPI_DATASET_ID || !process.env.META_CAPI_ACCESS_TOKEN) {
     return res.status(503).json({ error: 'Preview test trigger is not configured' });
   }
-  const supplied = String(req.headers['x-test-trigger-token'] || '');
+  // The Test Events code doubles as the trigger guard; it is not a Graph API access token.
+  const supplied = String(req.headers['x-test-event-code'] || '');
   const a = Buffer.from(supplied);
-  const b = Buffer.from(authToken);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+  const b = Buffer.from(testCode);
+  if (!a.length || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
