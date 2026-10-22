@@ -5,7 +5,8 @@
   "main": "api/webhook.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node local-server.js"
+    "start": "node local-server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.19.2",
