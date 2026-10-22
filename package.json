@@ -6,7 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node local-server.js",
-    "test": "node --test test/metaTracking.test.js"
+    "test": "node --test test/metaTracking.test.js test/metaCapi.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",
