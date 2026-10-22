@@ -799,7 +799,7 @@ async function handleEvent(event) {
                 orderId: event?.message?.id ? `sale-command:${event.message.id}` : undefined,
               });
               await reply(r.sent
-                ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. Meta accepted the event.`
+                ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. conversion provider reported the event received.`
                 : `Sale noted, but Meta tracking is unconfirmed (${String(r.reason || '').slice(0, 80)}). Ravi ko bata dijiye.`);
             }
           } catch (err) { console.error('[sale] failed:', err.message); }
