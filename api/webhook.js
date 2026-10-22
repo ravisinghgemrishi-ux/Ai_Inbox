@@ -37,6 +37,7 @@ const handoff = require('../lib/handoff');
 const identityBridge = require('../lib/identityBridge');
 const salesInterview = require('../lib/salesInterview');
 const metaTracking = require('../lib/metaTracking');
+const metaCapi = require('../lib/metaCapi');
 const formLead = require('../lib/formLead');
 const callWindow = require('../lib/callWindow');
 const { recordInstagramLead } = require('../lib/instagramLeads');
@@ -1302,6 +1303,16 @@ async function handleMessage(event) {
     if (isNewFormLead) {
       parsedForm = formLead.parseFormLead(messageText);
       await formLead.recordFormLead({ lead: parsedForm, platform, contact: senderHandle, memoryId });
+      // Non-WhatsApp form leads use Meta CAPI, not the WhatsApp CTWA endpoint.
+      // This is disabled until the dataset ID/token are configured in Vercel.
+      if (platform === 'instagram' && parsedForm.phone) {
+        await metaCapi.sendLead({
+          source: 'instagram_form',
+          identity: conversationId || event?.message?.id || senderHandle,
+          phone: parsedForm.phone,
+          externalId: identity?.grId || senderHandle,
+        });
+      }
       formRef = { new: true };
       aiContext.contextText += `\n\n${formLead.firstReplyNote(parsedForm, looksHinglishOrHindi(messageText))}`;
     } else {
@@ -1511,6 +1522,21 @@ async function handleMessage(event) {
 
   if (trigger) {
     await queueHandoff({ result, identity, platform, contact: senderHandle, memoryScope: 'conversation', memoryId, conversationId, accountId, intent: aiContext.intent.intent, trigger, extra });
+  }
+
+  // Organic Instagram leads are reported separately from form and WhatsApp
+  // CTWA leads. Only sales-qualified leads with a phone are eligible.
+  const organicSupportCase = aiContext.intent.intent === 'support_issue' ||
+    /return|refund|replace|exchange|damaged|wrong item|complaint/i.test(String(result.escalateReason || ''));
+  if (!sendError && platform === 'instagram' && !formRef && !organicSupportCase &&
+      ['HOT', 'WARM'].includes(String(result.leadStatus || '').toUpperCase()) &&
+      result.customerPhone) {
+    await metaCapi.sendLead({
+      source: 'instagram_organic',
+      identity: identity?.grId || senderHandle || conversationId,
+      phone: result.customerPhone,
+      externalId: identity?.grId || senderHandle,
+    });
   }
 
   // Report only a real, sales-qualified WhatsApp handoff as LeadSubmitted.
