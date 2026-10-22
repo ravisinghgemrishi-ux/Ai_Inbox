@@ -92,5 +92,5 @@ test('Purchase requires positive actual sale value and sends INR with a unique o
 test('sale command parser handles common phone and amount formats', () => {
   assert.deepEqual(meta.parseSaleCommand('sold 9876543210 45000'), { phone: '9876543210', amount: 45000 });
   assert.deepEqual(meta.parseSaleCommand('sale +91 98765-43210 45k'), { phone: '9876543210', amount: 45000 });
-  assert.equal(meta.parseSaleCommand('hello').error, undefined);
+  assert.equal(meta.parseSaleCommand('hello'), null);
 });
