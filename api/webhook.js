@@ -785,7 +785,7 @@ async function handleEvent(event) {
             else {
               let attribution = null;
               try {
-                const raw = await redisCommand(`/get/${encodeURIComponent(`gemrishi:meta-attribution:${String(sale.phone).replace(/\\D/g, '').slice(-10)}`)}`);
+                const raw = await redisCommand(`/get/${encodeURIComponent(`gemrishi:meta-attribution:${String(sale.phone).replace(/\D/g, '').slice(-10)}`)}`);
                 if (raw?.result) attribution = JSON.parse(raw.result);
               } catch (lookupErr) {
                 console.error('[sale] Meta attribution lookup failed:', lookupErr.message);
@@ -1527,7 +1527,7 @@ async function handleMessage(event) {
       if (leadPhone && accountId && conversationId) {
         try {
           const attribution = JSON.stringify({ accountId: String(accountId), conversationId: String(conversationId), savedAt: Date.now() });
-          await redisCommand(`/set/${encodeURIComponent(`gemrishi:meta-attribution:${String(leadPhone).replace(/\\D/g, '').slice(-10)}`)}/${encodeURIComponent(attribution)}/EX/604800`);
+          await redisCommand(`/set/${encodeURIComponent(`gemrishi:meta-attribution:${String(leadPhone).replace(/\D/g, '').slice(-10)}`)}/${encodeURIComponent(attribution)}/EX/604800`);
         } catch (storeErr) {
           console.error('[meta] attribution map save failed (lead event may still send):', storeErr.message);
         }
