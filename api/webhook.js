@@ -429,12 +429,9 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     // problems / B2B / 50k+ -> Neel; under 50k or unknown -> Yogesh and
     // Vishvas in turn (see lib/handoff.js assignRoute).
     const budgetText = [result?.customerBudget, extra.customerBudget].filter(Boolean).join(' ');
-    // 2026-10-20: tell Meta this ad chat became a genuine lead (WhatsApp 220
-    // only gets Meta-ad / Meta-form chats). Once per customer; background.
-    if (String(platform).toLowerCase().includes('whatsapp')) {
-      const leadPhone = result?.customerPhone || identity?.knownPhone || '';
-      if (leadPhone) runInBackground(metaTracking.leadSubmitted({ phone: leadPhone, conversationId, accountId, budget: budgetText, productInterest: result?.productInterest || '' }));
-    }
+    // Meta conversion is sent only in the explicit sales-qualified block below.
+    // Do not send here: queueHandoff may run for unqualified leads and would
+    // double-count the same customer when the qualified block also fires.
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const dedupeKey = await formLeadDedupeKey(identity?.grId || '', extra.formPhone);
     const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText, dedupeKey, productInterest: [result?.productInterest, extra.productInterest].filter(Boolean).join(' / ') }, { escalateToNeel });
@@ -786,8 +783,24 @@ async function handleEvent(event) {
             if (sale.error === 'phone') await reply('Customer ka 10 digit number bhi likhiye, jaise: sold 9876543210 45000');
             else if (sale.error === 'amount') await reply(`Amount bhi likhiye, jaise: sold ${sale.phone} 45000`);
             else {
-              const r = await metaTracking.purchase({ phone: sale.phone, amount: sale.amount, reportedBy: handoff.ROUTES[staffRoute].person });
-              await reply(r.sent ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. Meta ko bata diya.` : `Sale note nahi ho paayi (${String(r.reason || '').slice(0, 80)}). Ravi ko bata dijiye.`);
+              let attribution = null;
+              try {
+                const raw = await redisCommand(`/get/${encodeURIComponent(`gemrishi:meta-attribution:${String(sale.phone).replace(/\\D/g, '').slice(-10)}`)}`);
+                if (raw?.result) attribution = JSON.parse(raw.result);
+              } catch (lookupErr) {
+                console.error('[sale] Meta attribution lookup failed:', lookupErr.message);
+              }
+              const r = await metaTracking.purchase({
+                phone: sale.phone,
+                amount: sale.amount,
+                reportedBy: handoff.ROUTES[staffRoute].person,
+                accountId: attribution?.accountId || '',
+                conversationId: attribution?.conversationId || '',
+                orderId: event?.message?.id ? `sale-command:${event.message.id}` : undefined,
+              });
+              await reply(r.sent
+                ? `✅ Sale noted: ${sale.phone} - Rs ${sale.amount.toLocaleString('en-IN')}. Meta accepted the event.`
+                : `Sale noted, but Meta tracking is unconfirmed (${String(r.reason || '').slice(0, 80)}). Ravi ko bata dijiye.`);
             }
           } catch (err) { console.error('[sale] failed:', err.message); }
           return;
@@ -1507,8 +1520,20 @@ async function handleMessage(event) {
     /return|refund|replace|exchange|damaged|wrong item|complaint/i.test(String(result.escalateReason || ''));
   if (platform === 'whatsapp' && trigger && ['HOT', 'WARM'].includes(String(result.leadStatus || '').toUpperCase()) && !supportCaseForMeta) {
     try {
+      const leadPhone = result.customerPhone || identity?.knownPhone || parsedForm?.phone || '';
+      // Keep a short-lived source-account/conversation map so a later staff
+      // "sold" command can report the purchase against the original customer chat.
+      // This is attribution metadata only; it does not change sales routing.
+      if (leadPhone && accountId && conversationId) {
+        try {
+          const attribution = JSON.stringify({ accountId: String(accountId), conversationId: String(conversationId), savedAt: Date.now() });
+          await redisCommand(`/set/${encodeURIComponent(`gemrishi:meta-attribution:${String(leadPhone).replace(/\\D/g, '').slice(-10)}`)}/${encodeURIComponent(attribution)}/EX/604800`);
+        } catch (storeErr) {
+          console.error('[meta] attribution map save failed (lead event may still send):', storeErr.message);
+        }
+      }
       const metaResult = await metaTracking.leadSubmitted({
-        phone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || '',
+        phone: leadPhone,
         conversationId,
         accountId,
         productInterest: result.productInterest || aiContext.product || extra.productInterest || '',
