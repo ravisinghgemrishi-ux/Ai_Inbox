@@ -1350,6 +1350,8 @@ async function handleMessage(event) {
       message: messageText,
       intent: aiContext.intent,
       existingMemory,
+      platform,
+      knownPhone: identity?.knownPhone || (platform === 'whatsapp' ? String(senderHandle || '') : ''),
     });
   }
   // Consultation-plan payment flow (see lib/consultationFlow.js) - live by
