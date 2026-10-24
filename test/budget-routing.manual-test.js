@@ -22,8 +22,10 @@ for (const [b, v] of [['50000', 50000], ['₹25,000', 25000], ['40-45k', 45000],
 (async () => {
   const a = await h.assignRoute({ contact: 'c1', platform: 'whatsapp', customerBudget: '20k' });
   const b = await h.assignRoute({ contact: 'c2', platform: 'instagram', customerBudget: '' });
-  const c = await h.assignRoute({ contact: 'c3', platform: 'whatsapp', customerBudget: '50000' });
-  assert.deepStrictEqual([a, b, c], ['yogesh', 'vishvas', 'yogesh'], 'alternates one by one, 50k counts as under');
+  const c = await h.assignRoute({ contact: 'c3', platform: 'whatsapp', customerBudget: '49999' });
+  assert.deepStrictEqual([a, b, c], ['yogesh', 'vishvas', 'yogesh'], 'alternates one by one, under 50k');
+  // 2026-10-24 (Ravi): Rs 50,000 or more -> Neel.
+  assert.strictEqual(await h.assignRoute({ contact: 'c3b', platform: 'whatsapp', customerBudget: '50000' }), 'neel', '50k exactly -> Neel');
   assert.strictEqual(await h.assignRoute({ contact: 'c1', platform: 'whatsapp', customerBudget: '30k' }), 'yogesh', 'same customer keeps same person');
   assert.strictEqual(await h.assignRoute({ contact: 'c4', platform: 'whatsapp', customerBudget: '60k' }), 'neel', 'above 50k -> Neel');
   assert.strictEqual(await h.assignRoute({ contact: 'c1', platform: 'whatsapp', customerBudget: '1 lakh' }), 'neel', 'budget went up -> Neel');
