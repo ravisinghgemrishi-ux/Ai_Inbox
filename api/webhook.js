@@ -17,6 +17,8 @@ const { lookupLiveProduct, formatLiveProductData, _internal: productInternals } 
 const { mergeEscalation } = require('../lib/escalationPolicy');
 const { notifyEscalation, notifyHotLead } = require('../lib/escalationNotifier');
 const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
+const adCatalog = require('../lib/adCatalog');
+const requirementRules = require('../lib/requirementRules');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi, replyShouldBeHindi } = require('../lib/knowledgeBase');
@@ -657,6 +659,28 @@ function whatsappEntrySignal(event, messageText) {
 // 2026-10-21 check: chats from Click-to-WhatsApp ads start with Meta's
 // "Hello! Can I get more info on this?" and Mannat asked "which product?".
 // The ad's own headline/text comes with the first message - tell her.
+async function resolveAdEntry(event, memoryId) {
+  const key = `gemrishi:ad-entry:${memoryId}`;
+  try {
+    const { entry, adRef } = adCatalog.matchAd(event);
+    if (entry) {
+      await redisCommand(`/set/${encodeURIComponent(key)}/${entry.key}/EX/${30 * 86400}`);
+      return entry;
+    }
+    if (adRef) {
+      const meta = { ...((event?.conversation || {}).metadata || {}), ...((event?.message || {}).metadata || {}), ...((event && event.metadata) || {}) };
+      const label = String(meta.ctwa_headline || meta.referral?.headline || meta.referral?.ads_context_data?.ad_title || '').slice(0, 80);
+      await redisCommand(`/sadd/${encodeURIComponent('gemrishi:unmapped-ads')}/${encodeURIComponent(`${adRef} | ${label}`)}`);
+      console.log('[ad-catalog] ad/post not in catalog:', adRef, label);
+    }
+    const saved = await redisCommand(`/get/${encodeURIComponent(key)}`);
+    return adCatalog.entryFor(saved?.result || '');
+  } catch (err) {
+    console.error('[ad-catalog] lookup failed:', err.message);
+    return null;
+  }
+}
+
 function adContextNote(event) {
   const meta = { ...((event?.conversation || {}).metadata || {}), ...((event?.message || {}).metadata || {}), ...((event && event.metadata) || {}) };
   // Zernio also stores the ad headline on the conversation as ctwa_headline.
@@ -1268,6 +1292,7 @@ async function handleMessage(event) {
   let ownMemory = '';
   let existingMemory = '';
   let aiContext = { contextText: '', liveProductData: '', intent: classifyIntent(messageText), product: '', live: { found: false } };
+  let adEntry = null;
   let pipelineError = null;
   // FIX 8 (2026-10-04): Meta ad form leads.
   const isNewFormLead = formLead.isFormLead(messageText);
@@ -1317,6 +1342,11 @@ async function handleMessage(event) {
     if (platform === 'whatsapp') aiContext.contextText += `\n\n${WHATSAPP_SHORT_NOTE}`;
     const adNote = adContextNote(event);
     if (adNote) aiContext.contextText += `\n\n${adNote}`;
+    // 2026-10-24 (Ravi): which ad / reel did this customer come from? The
+    // ad id only arrives with the first message, so it is remembered for the
+    // chat (30 days). Unknown ad ids are saved so they can be added.
+    adEntry = await resolveAdEntry(event, memoryId);
+    if (adEntry) aiContext.contextText += `\n\n${adCatalog.adEntryNote(adEntry)}`;
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
@@ -1370,6 +1400,27 @@ async function handleMessage(event) {
       intent: aiContext.intent,
       existingMemory,
     });
+  }
+  // 2026-10-24 (Ravi) requirement rules: 10+ carat/ratti stones and items
+  // not on the website -> "very unique / special requirement", take name,
+  // number, budget and forward to the team (lib/requirementRules.js).
+  if (!result && !skipFlows) {
+    const ruleKey = `gemrishi:req-rule:${memoryId}`;
+    const firedBefore = await redisCommand(`/get/${encodeURIComponent(ruleKey)}`).then((d) => d?.result || '').catch(() => '');
+    const rr = requirementRules.evaluate({
+      message: messageText, memory: existingMemory, intent: aiContext.intent.intent, live: aiContext.live, adEntry, type: messageType,
+      known: { haveName: Boolean(identity?.knownName), havePhone: Boolean(identity?.knownPhone) || String(platform).toLowerCase().includes('whatsapp'), haveBudget: false },
+      alreadyFired: Boolean(firedBefore),
+    });
+    if (rr?.reply) {
+      await redisCommand(`/set/${encodeURIComponent(ruleKey)}/${rr.rule}/EX/${30 * 86400}`).catch(() => {});
+      result = {
+        reply: rr.reply, leadStatus: 'HOT', productInterest: rr.product || adEntry?.product || '',
+        escalate: true, escalateReason: rr.reason,
+      };
+    } else if (rr?.note) {
+      aiContext.contextText += `\n\n${rr.note}`;
+    }
   }
   if (!result) {
     result = await generateReply({ platform, type: messageType, message: messageText, contextText: aiContext.contextText, liveProductData: aiContext.liveProductData, intent: aiContext.intent.intent, forceSmart: Boolean(formRef) });
