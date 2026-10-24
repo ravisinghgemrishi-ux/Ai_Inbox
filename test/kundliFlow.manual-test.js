@@ -140,7 +140,7 @@ async function run() {
   // 7. Confirm ready to buy - Rudraksha has a known Shopify product page, so
   // the AI shares a plain PRODUCT PAGE link (never a pre-loaded cart link)
   // and does NOT escalate - the customer can buy it themselves.
-  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: 'yes I want to buy this', intent: { intent: 'consultation' } });
+  result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId, message: 'yes I want to buy this', intent: { intent: 'consultation' }, platform: 'whatsapp', knownPhone: '9876543210' });
   assert.strictEqual(result.escalate, false, 'rudraksha with a known product page should NOT escalate - self-serve');
   assert.ok(result.escalateReason.includes('kundli_ready_to_buy'), 'case notes should still be tagged for the lead sheet');
   assert.ok(!result.escalateReason.includes('/cart/'), 'must NEVER be a pre-loaded cart link');
@@ -217,7 +217,7 @@ async function run() {
   // and reached choosing_category instead.
   assert.ok(result.reply && result.reply.length > 0, 'must still send the customer a reply after recovering');
   assert.strictEqual(result.productInterest, 'Kundli Consultation', 'should be in choosing_category right after a successful chart generation');
-  assert.strictEqual(result.leadStatus, 'HOT');
+  assert.strictEqual(result.leadStatus, 'WARM', 'free reading stays WARM (qualification ladder)');
   console.log('OK: geocode miss re-asks for place instead of escalating, then recovers ->', result.reply.slice(0, 60));
 
   // 12. "Not sure" branch: when the customer doesn't know gemstone vs
@@ -230,9 +230,14 @@ async function run() {
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: "I'm not sure, you decide", intent: { intent: 'consultation' } });
   assert.strictEqual(result.escalate, false);
   console.log('OK: unsure -> asked for budget ->', result.reply);
+  // Since FIX 1 an unsure answer defaults to the gemstone pick, so this
+  // budget is the answer to the step-2 filter question: a qualified buyer
+  // who goes to sales (qualification ladder, 2026-10-24).
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: '2000 rupees', intent: { intent: 'consultation' } });
-  assert.strictEqual(result.escalate, false);
-  console.log('OK: budget given -> guidance reply ->', result.reply);
+  assert.strictEqual(result.escalate, true);
+  assert.strictEqual(result.leadStatus, 'HOT');
+  assert.ok(result.escalateReason.startsWith('kundli_qualified_budget'));
+  console.log('OK: budget given -> qualified, handed to sales ->', result.escalateReason.slice(0, 60));
   // Must still land back in the normal category choice - confirming Rudraksha now works.
   result = await maybeHandleKundliTurn({ enabled: true, type: 'dm', memoryId: memoryId5, message: 'Rudraksha please', intent: { intent: 'consultation' } });
   assert.ok(result.productInterest, 'should still recommend a product after the budget detour');
