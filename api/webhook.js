@@ -20,7 +20,7 @@ const { maybeHandleKundliTurn } = require('../lib/kundliFlow');
 const { maybeHandleConsultationPayment } = require('../lib/consultationFlow');
 const { maybeHandleSellerInquiry } = require('../lib/sellerInquiryFlow');
 const { detectReplyLanguageNote, looksHinglishOrHindi, replyShouldBeHindi } = require('../lib/knowledgeBase');
-const { checkHumanTakeover, markAiSent, markAiSentAnyChat, recordOutgoingMessage, isHumanActive } = require('../lib/humanTakeoverGuard');
+const { checkHumanTakeover, markAiSent, markAiSentAnyChat, recordOutgoingMessage, isHumanActive, humanRepliedSince } = require('../lib/humanTakeoverGuard');
 // Added 2026-09-29 (Ravi): GR Customer ID + Instagram->WhatsApp handoff.
 // Inert unless ENABLE_IDENTITY_BRIDGE=true (see lib/crossChannel.js).
 const { prepareInbound, addHandoffCta, saveCustomerFacts, handleInviteAnswer, maybeAppendInvite, identityNotes } = require('../lib/crossChannel');
@@ -843,14 +843,16 @@ async function handleOutgoingDm(event) {
   const platform = account.platform || conversation.platform;
   const conversationId = conversation.id || conversation.conversationId;
   const text = message.text || message.message || '';
-  if (!conversationId || !text) return;
+  const hasMedia = Array.isArray(message.attachments) && message.attachments.length > 0;
+  // 2026-10-24: a team member's photo / video / voice note counts too.
+  if (!conversationId || (!text && !hasMedia)) return;
   const memoryId = `${platform || 'social'}:${conversationId}`;
-  const res = await recordOutgoingMessage({ memoryId, text });
+  const res = await recordOutgoingMessage({ memoryId, text, message: { ...message, message: text } });
   if (res.human) {
     console.log('[webhook] team member replied - Mannat silenced for this chat:', memoryId);
     // 2026-10-17 audit: remember what the team said, so when Mannat takes
     // back over she stays consistent with it (manavpatel22011986 case).
-    await saveTurn('conversation', memoryId, 'team', text);
+    await saveTurn('conversation', memoryId, 'team', text || `[${(message.attachments[0] || {}).type || 'media'} sent by team]`);
   }
 }
 
@@ -1090,6 +1092,7 @@ async function handleComment(event) {
 }
 
 async function handleMessage(event) {
+  const handlerStartedMs = Date.now();
   const message = event.message || {};
   const conversation = event.conversation || {};
   const account = event.account || {};
@@ -1445,7 +1448,10 @@ async function handleMessage(event) {
         beforeSend: (text) => markAiSent(memoryId, text),
         // FIX 2026-10-16: a team member jumped in while Mannat was typing -
         // drop the rest of her reply rather than talk over them.
-        shouldStop: () => isHumanActive(memoryId),
+        // 2026-10-24: also re-read the chat right before each bubble - a
+        // reply typed in the WhatsApp/Instagram app stops Mannat at once.
+        shouldStop: async () => (await isHumanActive(memoryId))
+          || humanRepliedSince({ apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, memoryId, sinceMs: handlerStartedMs - 5000 }),
         send: (text, i) => sendConversationMessage({
           apiKey: process.env.ZERNIO_API_KEY, conversationId, accountId, text,
           idempotencyKey: idempotencyKey ? (i === 0 ? idempotencyKey : `${idempotencyKey}-p${i}`) : undefined,
