@@ -439,6 +439,7 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
     }
     const escalateToNeel = extra.route === 'neel' || handoff.needsNeel({ category: result?.category, escalate: result?.escalate, escalateReason: result?.escalateReason, intent });
     const dedupeKey = await formLeadDedupeKey(identity?.grId || '', extra.formPhone);
+    const hardNeel = escalateToNeel || handoff.parseBudget(budgetText) >= Number(process.env.LEAD_BUDGET_SPLIT || 50000);
     const route = await handoff.assignRoute({ grId: identity?.grId || '', platform, contact, customerBudget: budgetText, dedupeKey, productInterest: [result?.productInterest, extra.productInterest].filter(Boolean).join(' / ') }, { escalateToNeel });
     const q = await handoff.queueForward({
       route, grId: identity?.grId || '', platform, contact, memoryScope, memoryId,
@@ -451,6 +452,7 @@ async function queueHandoff({ result, identity, platform, contact, memoryScope, 
       trigger,
       ...extra,
       dedupeKey,
+      hardNeel,
       // 2026-10-21: extra.route (e.g. 'sales' for form leads) must not override
       // the budget routing decided above.
       route,
