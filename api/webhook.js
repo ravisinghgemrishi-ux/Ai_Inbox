@@ -703,6 +703,8 @@ function onlyAdsAndInstaOn() {
 // Meta's default Click-to-WhatsApp greeting (pre-typed in the customer's box).
 const CTWA_DEFAULT_GREETING = /^hello!?\s*can i get more info on this\??$/i;
 
+const CTWA_PREFILLED_PRICE = /^what is the price of this [a-z][a-z \-]{2,40}?\s*\??$/i;
+
 function adMetaFrom(conv) {
   const md = (conv && conv.metadata) || {};
   return md.ctwa_clid || md.ctwa_source_id || md.ctwa_source_type === 'ad';
@@ -725,6 +727,10 @@ async function conversationAdSignal(event, { waits = [0, 3000, 5000] } = {}) {
   }
   // Last resort: Meta's default ad greeting is only typed by ad clicks.
   if (CTWA_DEFAULT_GREETING.test(text)) return 'meta_ad_greeting';
+  // 2026-10-25 (Ravi): some ad clicks arrive with NO ctwa tag (Divi, 919466952954)
+  // and Mannat stayed silent. The running ads pre-type "What is the price of this
+  // Yellow Sapphire set?" - treat that exact kind of opener as an ad click.
+  if (CTWA_PREFILLED_PRICE.test(text)) return 'meta_ad_prefilled';
   return '';
 }
 
