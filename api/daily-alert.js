@@ -137,9 +137,11 @@ async function run({ date, dry }) {
   const results = await Promise.allSettled([
     sendTelegram(`🚨 GemRishi 7 PM check\n${body}`),
     sendEmail(process.env.DAILY_ALERT_URGENT_EMAIL || 'Sameer@gemrishi.com', `URGENT: ${pending.length} form lead(s) not contacted today (${date})`, body),
-    sendEmail(process.env.DAILY_ALERT_LOG_EMAIL || 'Neel.das@gemrishi.com', `Form leads not contacted - log (${date})`, `${body}\n\n--- Sheet copy (CSV) ---\n${sheetCopy(pending, date)}`),
+    // 2026-10-25 (Ravi): the detailed list goes to Mannat Chawla (not Neel,
+    // and not the salesperson) so she can chase it.
+    handoff.notifyStaff('sales', `🚨 *Lead not contacted* (${date})\n${body}`.slice(0, 3800), `uncontacted-${date}`),
   ]);
-  ['telegram', 'urgentEmail', 'logEmail'].forEach((k, i) => {
+  ['telegram', 'urgentEmail', 'mannatChawla'].forEach((k, i) => {
     summary.sent[k] = results[i].status === 'fulfilled' ? results[i].value : `error: ${results[i].reason?.message}`;
   });
   return summary;
