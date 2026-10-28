@@ -31,6 +31,7 @@ const { handleTeamMessage, handleAccountEvent } = require('../lib/teamMonitor');
 const { getMemory: monitorGetMemory, addTurn: monitorAddTurn } = require('../lib/memoryStore');
 const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
+const commentDelay = require('../lib/commentDelay');
 const { collectBurst } = require('../lib/messageBatcher');
 // Added 2026-10-04 (Ravi, quality batch): reply guards, one-time handoff,
 // Meta form leads.
@@ -52,7 +53,9 @@ const { recordInstagramLead } = require('../lib/instagramLeads');
 let waitUntil = null;
 try { ({ waitUntil } = require('@vercel/functions')); } catch { waitUntil = null; }
 
-module.exports.config = { api: { bodyParser: false } };
+// maxDuration 2026-10-28: Instagram comment replies now wait 30-60s before
+// sending (lib/commentDelay.js), which runs in the background after the ack.
+module.exports.config = { api: { bodyParser: false }, maxDuration: 180 };
 
 function redisConfig() {
   return {
@@ -957,6 +960,7 @@ async function useCommentDmSeed(handle, memoryId) {
 }
 
 async function handleComment(event) {
+  const startedAt = Date.now();
   const comment = event.comment || {};
   const post = event.post || {};
   const account = event.account || {};
@@ -975,9 +979,13 @@ async function handleComment(event) {
   if (!commentText) return;
 
   const replyKey = `comment:${commentId || inboundSafeId(event)}`;
+  // 2026-10-28 (Ravi): reply 30-60s after the comment, not instantly.
+  const delayTargetMs = commentDelay.pickTargetMs(platform);
   let slot = { allowed: true, reason: 'redis_unavailable' };
   try {
-    slot = await claimReplySlot(replyKey);
+    // Lock held 3 min (was 90s) so a redelivered webhook during the 30-60s
+    // wait is still recognised as a duplicate.
+    slot = await claimReplySlot(replyKey, 180);
     if (!slot.allowed) {
       console.log('[webhook] reply suppressed:', slot.reason, commentId || 'unknown');
       return;
@@ -997,6 +1005,7 @@ async function handleComment(event) {
   if (sellerTurn) {
     if (sellerTurn.reply && postId && accountId) {
       try {
+        await commentDelay.waitBeforeReply(delayTargetMs, startedAt);
         await replyToComment({ apiKey: process.env.ZERNIO_API_KEY, postId, accountId, commentId, text: sellerTurn.reply });
         await markReplySent(replyKey);
       } catch (err) { console.error('[webhook] seller reply failed:', err.message); await releaseReplySlot(replyKey); }
@@ -1067,6 +1076,12 @@ async function handleComment(event) {
   result = { ...result, reply: invite.reply };
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
+
+  // 2026-10-28 (Ravi): wait so the reply lands 30-60s after the comment.
+  if (postId && accountId && result.reply) {
+    const waited = await commentDelay.waitBeforeReply(delayTargetMs, startedAt);
+    if (waited) console.log(`[webhook] comment reply delayed ${Math.round(waited / 1000)}s (target ${Math.round(delayTargetMs / 1000)}s)`);
+  }
 
   // 2026-10-17 (Ravi): Instagram's own comment auto-DM was switched off, so
   // Mannat now DMs the commenter herself with the full answer, and the public
