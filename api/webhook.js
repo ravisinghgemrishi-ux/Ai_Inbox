@@ -1448,7 +1448,7 @@ async function handleMessage(event) {
     customerName: result.customerName || identity?.knownName || parsedForm?.name || '',
     customerPhone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || '',
     customerCity: result.customerCity || parsedForm?.city || '',
-    customerBudget: result.customerBudget || parsedForm?.budget || '',
+    customerBudget: result.customerBudget || parsedForm?.budget || handoff.budgetFromChat(messageText),
   };
   // FIX 1 + FIX 3 backstop: no repeated category question, no repeated
   // phone ask, "- Mannat" only on the first reply.
