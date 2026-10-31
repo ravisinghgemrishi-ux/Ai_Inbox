@@ -33,6 +33,7 @@ const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
 const commentDelay = require('../lib/commentDelay');
 const crmLeadWebhook = require('../lib/crmLeadWebhook');
+const contactAsk = require('../lib/contactAsk');
 const { collectBurst } = require('../lib/messageBatcher');
 // Added 2026-10-04 (Ravi, quality batch): reply guards, one-time handoff,
 // Meta form leads.
@@ -1487,6 +1488,24 @@ async function handleMessage(event) {
     blocked: Boolean(formRef) || aiContext.intent.intent === 'b2b_inquiry',
   });
   result = { ...result, reply: invite.reply };
+  // 2026-10-31 (Ravi): Instagram DM customers who are talking to Mannat are
+  // asked for name + WhatsApp number (max twice), so the lead can reach the
+  // CRM, which matches by phone (lib/contactAsk.js).
+  if (String(platform).toLowerCase().includes('instagram') && result.reply) {
+    const askKey = encodeURIComponent(`gemrishi:ig-contact-ask:${memoryId}`);
+    let asksSoFar = 0;
+    try { asksSoFar = Number((await redisCommand(`/get/${askKey}`))?.result || 0) || 0; } catch (_) { asksSoFar = 0; }
+    const askText = contactAsk.decide({
+      platform, type: messageType, reply: result.reply, priorMemory: ownMemory,
+      knownPhone: result.customerPhone || identity?.knownPhone || '', knownName: result.customerName || identity?.knownName || '',
+      leadStatus: result.leadStatus, escalated: Boolean(result.escalate), intent: aiContext.intent.intent,
+      escalateReason: result.escalateReason, invitedThisTurn: Boolean(invite.invited), asksSoFar, hindi: dmHindi,
+    });
+    if (askText) {
+      result = { ...result, reply: `${result.reply}\n\n${askText}` };
+      try { await redisCommand(`/set/${askKey}/${asksSoFar + 1}/EX/${30 * 86400}`); } catch (_) { /* best effort */ }
+    }
+  }
   await saveCustomerFacts(identity, result, aiContext.product || '');
   let sendError = '';
 
