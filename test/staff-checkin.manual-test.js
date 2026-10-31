@@ -5,6 +5,8 @@ process.env.REDIS_KV_REST_API_TOKEN = 'x';
 process.env.ZERNIO_API_KEY = 'k';
 process.env.LEAD_ALERT_WHATSAPP_ACCOUNT_ID = 'acc220';
 process.env.LEAD_ALERT_TEMPLATE = 'mannat_lead_alert';
+process.env.LEAD_ALERT_TEMPLATE_CONFIRMED = 'true'; // template + Direct Send are opt-in since 2026-10-21
+process.env.LEAD_ALERT_DIRECT_SEND = 'on';
 const store = {}; const lists = {}; const sent = [];
 let templateOk = false; let directOk = false;
 global.fetch = async (url, opts = {}) => {
