@@ -1372,6 +1372,12 @@ async function handleMessage(event) {
     // chat (30 days). Unknown ad ids are saved so they can be added.
     adEntry = await resolveAdEntry(event, memoryId);
     if (adEntry) aiContext.contextText += `\n\n${adCatalog.adEntryNote(adEntry)}`;
+    // 2026-10-31 (Neelu, 31 Oct): her name "Neelam" was read as the stone and
+    // she was offered a Blue Sapphire. Flag names that are also gem names.
+    const knownNm = String(identity?.knownName || '').trim();
+    if (knownNm && GEM_NAME_WORD.test(knownNm)) {
+      aiContext.contextText += `\n\nNAME: the customer's name is "${knownNm}". When they write "${knownNm.split(/\s+/)[0]}", it is their NAME, not a gemstone request. Do not offer that stone unless they clearly ask for it.`;
+    }
   } catch (err) {
     pipelineError = err;
     console.error('[webhook] DM context build failed - will use safety net if needed:', err.message);
@@ -1458,6 +1464,11 @@ async function handleMessage(event) {
     fromGeneralReply = false;
   }
   result = mergeEscalation(result, messageText, false);
+  // 2026-10-31: agencies / freelancers pitching services were escalated to
+  // sales as leads. Polite reply, no escalation, NOT_A_LEAD.
+  if (VENDOR_PITCH.test(messageText) && !/\b(buy|price|ratti|carat|chahiye|lena)\b/i.test(messageText)) {
+    result = { ...result, leadStatus: 'NOT_A_LEAD', escalate: false, escalateReason: 'vendor_or_service_pitch' };
+  }
   if (handover.escalate) result = { ...result, escalate: true, escalateReason: result.escalateReason || handover.reason };
   // Already-known name/phone (e.g. the WhatsApp number itself) count as given.
   result = {
@@ -1634,6 +1645,9 @@ async function handleMessage(event) {
     }
   }
 }
+
+const GEM_NAME_WORD = /^\s*(neelam|nilam|moti|panna|heera|hira|manik|manikya|pukhraj|ratna|gomed|ruby|pearl|emerald|opal|coral)\b/i;
+const VENDOR_PITCH = /\b(i|we) (help|offer|provide|specialize|specialise)\b[^.]{0,80}\b(brands?|businesses|services?|marketing|content|editing|seo|leads?|followers|website|ads)\b|\b(my|our) (services|portfolio|agency)\b|\b(reel|video) editing\b|\bsocial media management\b|\bcollaborat(e|ion)\b[^.]{0,40}\b(brand|page|influencer)\b|\b(digital marketing|seo services|web development) (agency|services)\b/i;
 
 function inboundSafeId(event) {
   return crypto.createHash('sha256').update(JSON.stringify(event)).digest('hex').slice(0, 24);
