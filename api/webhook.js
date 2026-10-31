@@ -32,6 +32,7 @@ const { getMemory: monitorGetMemory, addTurn: monitorAddTurn } = require('../lib
 const { KNOWLEDGE_BASE } = require('../lib/replyEngine');
 const { sendLikeHuman } = require('../lib/humanTyping');
 const commentDelay = require('../lib/commentDelay');
+const crmLeadWebhook = require('../lib/crmLeadWebhook');
 const { collectBurst } = require('../lib/messageBatcher');
 // Added 2026-10-04 (Ravi, quality batch): reply guards, one-time handoff,
 // Meta form leads.
@@ -1576,6 +1577,19 @@ async function handleMessage(event) {
       budget: result.customerBudget, interest: isSupportCase ? `SUPPORT: ${result.productInterest || 'return/complaint'}` : result.productInterest, leadStatus: isSupportCase ? 'SUPPORT (not a sale)' : result.leadStatus,
       isFormLead: Boolean(formRef),
     });
+    // 2026-10-31 (Ravi): HOT / escalated chats -> CRM (Zaptriq) workflow,
+    // which assigns an owner and opens a deal (lib/crmLeadWebhook.js).
+    const crm = await crmLeadWebhook.sendQualifiedLead({
+      platform, type: messageType, handle: senderHandle,
+      name: result.customerName, phone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || (platform === 'whatsapp' ? senderHandle : ''),
+      leadStatus: result.leadStatus, escalated: Boolean(result.escalate), escalateReason: result.escalateReason,
+      intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '',
+      budget: result.customerBudget || parsedForm?.budget || '', purpose: result.customerPurpose || '',
+      fromAd: Boolean(adEntry || formRef), lastMessage: messageText, reply: result.reply,
+    }, { redis: redisCommand });
+    if (crm.sent || !['disabled', 'not_qualified', 'already_sent'].includes(crm.reason)) {
+      console.log('[crm] lead webhook', JSON.stringify({ sent: crm.sent, reason: crm.reason || '', level: crm.level || '' }));
+    }
   }
 
   if (trigger) {
