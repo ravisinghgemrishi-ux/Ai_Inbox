@@ -1,6 +1,6 @@
 // Run: node test/crm-lead-webhook.manual-test.js  (no network: fake fetch + fake Redis)
 const assert = require('assert');
-const { sendQualifiedLead, _internal: c } = require('../lib/crmLeadWebhook');
+const { sendQualifiedLead, sendChatUpdate, _internal: c } = require('../lib/crmLeadWebhook');
 
 const URL = 'https://example.test/hook';
 function fakeRedis() {
@@ -67,6 +67,35 @@ function fakeFetch(calls, ok = true) {
   assert(!out.sent && Object.keys(r.store).length === 0);
   out = await sendQualifiedLead(base, { redis: r.fn, fetchFn: async () => { throw new Error('network'); }, url: URL });
   assert(!out.sent && out.reason === 'error');
+
+  // 2026-11-01: full chat goes into summary + transcript.
+  r = fakeRedis(); calls = [];
+  const chat = 'Customer: hi\nMannat: Namaste!\nCustomer: price?\nMannat: ₹8,080';
+  out = await sendQualifiedLead({ ...base, transcript: chat }, { redis: r.fn, fetchFn: fakeFetch(calls), url: URL });
+  assert(out.sent && calls[0].body.transcript === chat && calls[0].body.summary.includes('Full chat with Mannat') && calls[0].body.summary.includes('Customer: hi'));
+  assert(Object.keys(r.store).some((k) => k.startsWith('gemrishi:crm-in:')), 'in-CRM marker set');
+  // Long chats keep the most recent part.
+  const long = c.clipTranscript('x'.repeat(5000) + 'END');
+  assert(long.endsWith('END') && long.length < 3600 && long.startsWith('(earlier messages cut)'));
+
+  // Chat updates: only for leads already in the CRM, only this turn, never re-alerting.
+  const updCalls = [];
+  const UPD = 'https://example.test/update';
+  out = await sendChatUpdate({ ...base, lastMessage: 'loose stone please', reply: 'Here is a 5.40 ct option' }, { redis: r.fn, fetchFn: fakeFetch(updCalls), url: UPD });
+  assert(out.sent && updCalls.length === 1 && updCalls[0].url === UPD);
+  assert.strictEqual(updCalls[0].body.transcript, 'Customer: loose stone please\nMannat: Here is a 5.40 ct option');
+  assert.strictEqual(updCalls[0].body.phone, '+919810757533');
+  // Not in CRM / switched off / no phone -> nothing sent.
+  const fresh = fakeRedis();
+  assert.strictEqual((await sendChatUpdate({ ...base, phone: '9123456789' }, { redis: fresh.fn, fetchFn: fakeFetch(updCalls), url: UPD })).reason, 'not_in_crm');
+  assert.strictEqual((await sendChatUpdate(base, { redis: r.fn, fetchFn: fakeFetch(updCalls), url: '' })).reason, 'disabled');
+  assert.strictEqual((await sendChatUpdate({ ...base, phone: '' }, { redis: r.fn, fetchFn: fakeFetch(updCalls), url: UPD })).reason, 'no_phone');
+  assert.strictEqual(updCalls.length, 1);
+  // Lead sent before this change (only the 24 h dedupe key) still gets updates.
+  const old = fakeRedis(); old.store['gemrishi:crm-lead:919810757533'] = 'hot';
+  assert((await sendChatUpdate(base, { redis: old.fn, fetchFn: fakeFetch(updCalls), url: UPD })).sent);
+  // CRM error never throws.
+  assert.strictEqual((await sendChatUpdate(base, { redis: r.fn, fetchFn: async () => { throw new Error('net'); }, url: UPD })).reason, 'error');
 
   console.log('crm-lead-webhook: all assertions passed');
 })();
