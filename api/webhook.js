@@ -1609,16 +1609,26 @@ async function handleMessage(event) {
     });
     // 2026-10-31 (Ravi): HOT / escalated chats -> CRM (Zaptriq) workflow,
     // which assigns an owner and opens a deal (lib/crmLeadWebhook.js).
-    const crm = await crmLeadWebhook.sendQualifiedLead({
+    // 2026-11-01 (Ravi): the send carries the full recent chat, and every
+    // later turn of a lead already in the CRM is added as a CRM note.
+    const crmLead = {
       platform, type: messageType, handle: senderHandle,
       name: result.customerName, phone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || (platform === 'whatsapp' ? senderHandle : ''),
       leadStatus: result.leadStatus, escalated: Boolean(result.escalate), escalateReason: result.escalateReason,
       intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '',
       budget: result.customerBudget || parsedForm?.budget || '', purpose: result.customerPurpose || '',
       fromAd: Boolean(adEntry || formRef), lastMessage: messageText, reply: result.reply,
-    }, { redis: redisCommand });
+      transcript: await loadContext('conversation', memoryId),
+    };
+    const crm = await crmLeadWebhook.sendQualifiedLead(crmLead, { redis: redisCommand });
     if (crm.sent || !['disabled', 'not_qualified', 'already_sent'].includes(crm.reason)) {
       console.log('[crm] lead webhook', JSON.stringify({ sent: crm.sent, reason: crm.reason || '', level: crm.level || '' }));
+    }
+    if (!crm.sent) {
+      const upd = await crmLeadWebhook.sendChatUpdate(crmLead, { redis: redisCommand });
+      if (upd.sent || !['disabled', 'not_in_crm', 'no_phone'].includes(upd.reason)) {
+        console.log('[crm] chat update', JSON.stringify({ sent: upd.sent, reason: upd.reason || '' }));
+      }
     }
   }
 
