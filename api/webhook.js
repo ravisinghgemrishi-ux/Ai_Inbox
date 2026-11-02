@@ -1297,7 +1297,11 @@ async function handleMessage(event) {
     scopeId: memoryId, message: messageText, intent: classifyIntent(messageText),
   });
   if (sellerTurn) {
-    if (sellerTurn.reply && accountId) {
+    if (sellerTurn.reply && event._crm) {
+      await markAiSent(memoryId, sellerTurn.reply);
+      event._crm.reply = sellerTurn.reply;
+      await markReplySent(replyKey).catch(() => {});
+    } else if (sellerTurn.reply && accountId) {
       try {
         await sendLikeHuman({
           reply: sellerTurn.reply,
@@ -1538,7 +1542,14 @@ async function handleMessage(event) {
   result = { ...result, reply: withForwardedLine(result.reply, { trigger, existingMemory, hindi: dmHindi }) };
 
   let stoppedForHuman = false;
-  if (accountId && result.reply) {
+  // 2026-11-02 (Ravi): CRM WhatsApp line (110). The CRM workflow sends the
+  // reply itself, so Mannat only hands the text back (api/crm-whatsapp.js).
+  if (event._crm && result.reply) {
+    await markAiSent(memoryId, result.reply);
+    event._crm.reply = result.reply;
+    try { await markReplySent(replyKey); }
+    catch (err) { console.error('[webhook] CRM reply ready but Redis status update failed:', err.message); }
+  } else if (accountId && result.reply) {
     try {
       const idempotencyKey = messageId
         ? messageReplyIdempotencyKey({ conversationId, accountId, messageId })
@@ -1677,6 +1688,7 @@ function isFacebookDmPlatform(platform) {
 }
 
 // test hooks (2026-10-07)
+module.exports._handleMessage = handleMessage;
 module.exports._productQueryWithContext = productQueryWithContext;
 module.exports._handoffTrigger = handoffTrigger;
 module.exports._shouldDmCommenter = shouldDmCommenter;
