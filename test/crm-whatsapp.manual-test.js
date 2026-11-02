@@ -25,6 +25,10 @@ const handoff = require('../lib/handoff');
   assert.strictEqual(ev.conversation.participantPhone, '919235621260');
   assert.strictEqual(ev.message.id, 'crm110-wamid.1');
   assert.strictEqual(ev._crm.reply, '');
+  // No id from the CRM -> a fresh one every call (never a shared id).
+  const a = buildEvent({ phone: '9235621260', message: 'ok' }).message.id;
+  const b = buildEvent({ phone: '9235621260', message: 'ok' }).message.id;
+  assert(a.startsWith('crm110-919235621260-') && a !== b);
 
   // Brain reply is returned.
   const env = { MANNAT_CRM_REPLIES: 'on' };

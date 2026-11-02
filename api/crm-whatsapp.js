@@ -85,7 +85,10 @@ function buildEvent({ phone, name, message, messageId }) {
       participantUsername: digits, participantName: String(name || '').trim(),
     },
     message: {
-      id: messageId ? `crm110-${String(messageId).slice(0, 120)}` : undefined,
+      // The CRM has no per-message id; a fresh id per call keeps the brain's
+      // id gate from swallowing a repeated "ok" later. Same-text bursts are
+      // still caught by its content dedupe.
+      id: `crm110-${messageId ? String(messageId).slice(0, 120) : `${digits}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`}`,
       text: String(message || '').slice(0, 4000),
     },
     _crm: { reply: '' },
