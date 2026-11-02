@@ -89,6 +89,8 @@ function secretOk(given, expected) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+const OPT_OUT = /^\s*(stop|stop all|unsubscribe|band karo|mat bhejo|no more messages?)\s*[.!]*\s*$/i;
+
 function allowedNumber(digits, list = process.env.MANNAT_CRM_ALLOWED_NUMBERS) {
   const allowed = String(list || '').split(',').map((x) => x.replace(/\D/g, '')).filter(Boolean);
   if (!allowed.length) return true;
@@ -139,6 +141,9 @@ async function handle(body, { env = process.env, run = (ev) => brain()._handleMe
   if (!digits || !text) return { reply: '', reason: 'missing_phone_or_message' };
   if (handoff.routeForStaffNumber(digits)) return { reply: '', reason: 'staff_number' };
   if (!allowedNumber(digits, env.MANNAT_CRM_ALLOWED_NUMBERS)) return { reply: '', reason: 'not_in_rollout' };
+  // "STOP" (opt-out from a broadcast) never gets an AI reply; the CRM's own
+  // WABA compliance handles the unsubscribe.
+  if (OPT_OUT.test(text)) return { reply: '', reason: 'opt_out' };
 
   const event = buildEvent({ phone: digits, name: body.name, message: text, messageId: body.message_id || body.messageId });
   await run(event);
@@ -168,4 +173,4 @@ module.exports = async (req, res) => {
 };
 
 module.exports.config = { maxDuration: 60 };
-module.exports._internal = { handle, buildEvent, digitsOf, allowedNumber, secretOk, templateParam };
+module.exports._internal = { handle, buildEvent, digitsOf, allowedNumber, secretOk, templateParam, OPT_OUT };

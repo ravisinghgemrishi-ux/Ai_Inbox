@@ -64,6 +64,14 @@ const handoff = require('../lib/handoff');
   if (staffPhone) assert.strictEqual((await handle({ phone: staffPhone, message: 'any lead?' }, { env, run: never })).reason, 'staff_number');
   assert.strictEqual((await handle({ phone: '9888888888', message: 'x' }, { env: { MANNAT_CRM_ALLOWED_NUMBERS: '9235621260' }, run: never })).reason, 'not_in_rollout');
 
+  // STOP / opt-out never reaches the brain; normal words containing "stop" do.
+  for (const t of ['STOP', 'Stop', ' stop. ', 'Unsubscribe', 'band karo']) {
+    assert.strictEqual((await handle({ phone: '9235621260', message: t }, { env, run: never })).reason, 'opt_out', t);
+  }
+  let ran = false;
+  await handle({ phone: '9235621260', message: 'non-stop pooja ke liye stone?' }, { env, run: async () => { ran = true; } });
+  assert(ran);
+
   // The real brain exports the handler this endpoint calls.
   assert.strictEqual(typeof require('../api/webhook')._handleMessage, 'function');
 
