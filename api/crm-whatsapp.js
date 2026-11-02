@@ -50,8 +50,27 @@ function digitsOf(phone) {
 // The CRM can only send Mannat's text as an approved template variable.
 // Meta rejects variables containing new lines, tabs or more than four
 // spaces in a row, and the whole body must stay under 1,024 characters.
+// The 110 template already opens with "Namaste 🙏" and closes with
+// "Warm regards, Mannat", so Mannat's own greeting / sign-off is dropped here.
+const GREETING_WORD = /^(namaste|namaskar|hello|hi|hey)\b/i;
+const TRAILING_SIGNOFF = /\n+\s*(?:warm\s+)?regards[\s\S]{0,60}$/i;
+
+function dropGreeting(text) {
+  const s = text.trimStart();
+  if (!GREETING_WORD.test(s)) return text;
+  const lines = s.split('\n');
+  // "Namaste Ravi 🙏" alone on the first line -> drop the line.
+  if (lines.length > 1 && lines[0].length <= 40) return lines.slice(1).join('\n');
+  // "Namaste! 🙏 Pukhraj ..." / "Hi Ravi, the price ..." -> drop up to the first ! , .
+  const m = s.match(/^[^\n!,.]{0,30}[!,.][\s\p{Extended_Pictographic}]*/u);
+  return m ? s.slice(m[0].length) : text;
+}
+
 function templateParam(reply, max = 900) {
-  let s = String(reply || '')
+  let s = String(reply || '').replace(TRAILING_SIGNOFF, '');
+  const stripped = dropGreeting(s).trim();
+  if (stripped) s = stripped.charAt(0).toUpperCase() + stripped.slice(1);
+  s = s
     .replace(/\r/g, '')
     .split('\n').map((l) => l.trim()).filter(Boolean)
     .map((l) => (/[.!?:;,…)]$/.test(l) || /\p{Extended_Pictographic}$/u.test(l) ? l : `${l}.`))
