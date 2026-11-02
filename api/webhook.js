@@ -1613,6 +1613,7 @@ async function handleMessage(event) {
     // later turn of a lead already in the CRM is added as a CRM note.
     const crmLead = {
       platform, type: messageType, handle: senderHandle,
+      profileName: conversation.participantName || message.senderName || '',
       name: result.customerName, phone: result.customerPhone || identity?.knownPhone || parsedForm?.phone || (platform === 'whatsapp' ? senderHandle : ''),
       leadStatus: result.leadStatus, escalated: Boolean(result.escalate), escalateReason: result.escalateReason,
       intent: aiContext.intent.intent, productInterest: result.productInterest || aiContext.product || '',
