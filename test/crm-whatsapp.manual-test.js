@@ -57,3 +57,22 @@ const handoff = require('../lib/handoff');
 
   console.log('crm-whatsapp: all assertions passed');
 })().catch((err) => { console.error(err); process.exit(1); });
+
+// HTTP layer: auth, 409 for "say nothing" (CRM stops the run), 200 with a reply.
+(async () => {
+  const assert2 = require('assert');
+  process.env.MANNAT_CRM_SECRET = 'test-secret-123';
+  process.env.MANNAT_CRM_ALLOWED_NUMBERS = '9235621260';
+  const handler = require('../api/crm-whatsapp');
+  const call = async (headers, body) => {
+    let status = 0; let json = null;
+    const res = { status(s) { status = s; return this; }, json(j) { json = j; return this; } };
+    await handler({ method: 'POST', headers, body }, res);
+    return { status, json };
+  };
+  assert2.strictEqual((await call({}, { phone: '9235621260', message: 'hi' })).status, 401);
+  const outside = await call({ 'x-mannat-secret': 'test-secret-123' }, { phone: '9888888888', message: 'hi' });
+  assert2.strictEqual(outside.status, 409);
+  assert2.strictEqual(outside.json.reason, 'not_in_rollout');
+  console.log('crm-whatsapp (http): all assertions passed');
+})().catch((err) => { console.error(err); process.exit(1); });

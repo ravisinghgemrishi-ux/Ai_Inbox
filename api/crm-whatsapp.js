@@ -18,9 +18,10 @@
 //   - staff numbers never get an AI reply;
 //   - staff take over by tagging the contact "mannat-off" in the CRM (the
 //     workflow skips this call), because Mannat cannot see CRM inbox replies;
-//   - an empty reply means "say nothing" (e.g. this message was folded into
-//     a combined answer to several quick messages) - the workflow must not
-//     send anything then.
+//   - "say nothing" (e.g. this message was folded into a combined answer to
+//     several quick messages, staff number, outside rollout) is answered
+//     with HTTP 409; the webhook step's "If this step fails" = Stop workflow,
+//     so the CRM sends nothing.
 //
 // Vercel settings:
 //   MANNAT_CRM_SECRET           required; the CRM sends it as header
@@ -119,11 +120,15 @@ module.exports = async (req, res) => {
   try {
     const out = await handle(body || {});
     console.log('[crm-110]', JSON.stringify({ reason: out.reason, chars: out.reply.length }));
-    return res.status(200).json({ reply: out.reply, send: out.reply ? 'yes' : 'no' });
+    // The CRM's Filter step cannot read webhook variables, so "say nothing"
+    // is signalled with a non-2xx status: the workflow step is set to
+    // "Stop workflow" on failure, so nothing is sent to the customer.
+    if (!out.reply) return res.status(409).json({ reply: '', send: 'no', reason: out.reason });
+    return res.status(200).json({ reply: out.reply, send: 'yes' });
   } catch (err) {
-    // Never leave the customer hanging on a crash: say nothing, log loudly.
+    // Crash: say nothing (the CRM stops the run), log loudly.
     console.error('[crm-110] failed:', err.message);
-    return res.status(200).json({ reply: '', send: 'no', error: 'internal' });
+    return res.status(500).json({ reply: '', send: 'no', error: 'internal' });
   }
 };
 
