@@ -99,3 +99,34 @@ function fakeFetch(calls, ok = true) {
 
   console.log('crm-lead-webhook: all assertions passed');
 })();
+
+// 2026-11-02: names and timeouts
+(async () => {
+  const { _internal: c2 } = require('../lib/crmLeadWebhook');
+  const assert2 = require('assert');
+  assert2.strictEqual(c2.displayName({ handle: '+919690200444', profileName: 'Sanjay DIWAKAR' }), 'Sanjay DIWAKAR');
+  assert2.strictEqual(c2.displayName({ handle: '+919690200444' }), 'Customer');
+  assert2.strictEqual(c2.displayName({ name: 'Ravi', handle: '+91999', profileName: 'X' }), 'Ravi');
+  assert2.strictEqual(c2.displayName({ name: '+91 99109 53175', profileName: 'Ravi Bharati' }), 'Ravi Bharati');
+  assert2.strictEqual(c2.displayName({ handle: 'kapil_bairagi05', profileName: '' }), '@kapil_bairagi05');
+
+  // timeout once, then success -> one retry
+  let n = 0;
+  const flaky = async (url, opts) => { n++; if (n === 1) { const e = new Error('This operation was aborted'); throw e; } return { ok: true, status: 200 }; };
+  const res = await c2.postJson(flaky, 'https://x.test', {}, { timeoutMs: 50, retryDelayMs: 1 });
+  assert2(res.ok && n === 2, `retries once (n=${n})`);
+  // 500 then 200
+  n = 0;
+  const f500 = async () => { n++; return n === 1 ? { ok: false, status: 502 } : { ok: true, status: 200 }; };
+  assert2((await c2.postJson(f500, 'u', {}, { retryDelayMs: 1 })).ok && n === 2);
+  // 400 is not retried
+  n = 0;
+  const f400 = async () => { n++; return { ok: false, status: 400 }; };
+  assert2(!(await c2.postJson(f400, 'u', {}, { retryDelayMs: 1 })).ok && n === 1);
+  // a hung CRM is cut at the timeout
+  n = 0;
+  const hang = (url, opts) => new Promise((_, rej) => { n++; opts.signal.addEventListener('abort', () => rej(new Error('aborted'))); });
+  await assert2.rejects(c2.postJson(hang, 'u', {}, { timeoutMs: 30, retryDelayMs: 1 }));
+  assert2.strictEqual(n, 2);
+  console.log('crm-lead-webhook (names/timeouts): all assertions passed');
+})();
