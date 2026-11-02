@@ -34,7 +34,11 @@ const handoff = require('../lib/handoff');
   const { templateParam } = require('../api/crm-whatsapp')._internal;
   const tp = templateParam('Namaste Ravi 🙏\n\nYellow Sapphire 5.40 ct\n- ₹8,080\n\tCertified    stone');
   assert(!/[\n\t]/.test(tp) && !/ {2,}/.test(tp), tp);
-  assert.strictEqual(tp, 'Namaste Ravi 🙏 Yellow Sapphire 5.40 ct. - ₹8,080. Certified stone.');
+  assert.strictEqual(tp, 'Yellow Sapphire 5.40 ct. - ₹8,080. Certified stone.');
+  assert.strictEqual(templateParam('Namaste! 🙏 Pukhraj starts at ₹8,080.'), 'Pukhraj starts at ₹8,080.');
+  assert.strictEqual(templateParam('Hi Ravi, the price is ₹8,080.\n\nWarm regards,\nMannat'), 'The price is ₹8,080.');
+  assert.strictEqual(templateParam('Namaste'), 'Namaste.');
+  assert.strictEqual(templateParam('Hiring? No, sorry.'), 'Hiring? No, sorry.');
   const big = templateParam('word '.repeat(400));
   assert(big.length <= 900 && big.endsWith('…'));
 
