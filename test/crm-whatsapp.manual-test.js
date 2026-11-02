@@ -30,6 +30,14 @@ const handoff = require('../lib/handoff');
   const b = buildEvent({ phone: '9235621260', message: 'ok' }).message.id;
   assert(a.startsWith('crm110-919235621260-') && a !== b);
 
+  // Template variable: no new lines / tabs / long space runs, capped length.
+  const { templateParam } = require('../api/crm-whatsapp')._internal;
+  const tp = templateParam('Namaste Ravi 🙏\n\nYellow Sapphire 5.40 ct\n- ₹8,080\n\tCertified    stone');
+  assert(!/[\n\t]/.test(tp) && !/ {2,}/.test(tp), tp);
+  assert.strictEqual(tp, 'Namaste Ravi 🙏 Yellow Sapphire 5.40 ct. - ₹8,080. Certified stone.');
+  const big = templateParam('word '.repeat(400));
+  assert(big.length <= 900 && big.endsWith('…'));
+
   // Brain reply is returned.
   const env = { MANNAT_CRM_REPLIES: 'on' };
   let seen = null;

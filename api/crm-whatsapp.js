@@ -47,6 +47,22 @@ function digitsOf(phone) {
   return d.length >= 10 && d.length <= 15 ? d : '';
 }
 
+// The CRM can only send Mannat's text as an approved template variable.
+// Meta rejects variables containing new lines, tabs or more than four
+// spaces in a row, and the whole body must stay under 1,024 characters.
+function templateParam(reply, max = 900) {
+  let s = String(reply || '')
+    .replace(/\r/g, '')
+    .split('\n').map((l) => l.trim()).filter(Boolean)
+    .map((l) => (/[.!?:;,…)]$/.test(l) || /\p{Extended_Pictographic}$/u.test(l) ? l : `${l}.`))
+    .join(' ')
+    .replace(/\t/g, ' ')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+  if (s.length > max) s = `${s.slice(0, max - 1).replace(/\s+\S*$/, '')}…`;
+  return s;
+}
+
 function secretOk(given, expected) {
   if (!expected || !given) return false;
   const a = Buffer.from(String(given));
@@ -124,7 +140,7 @@ module.exports = async (req, res) => {
     // is signalled with a non-2xx status: the workflow step is set to
     // "Stop workflow" on failure, so nothing is sent to the customer.
     if (!out.reply) return res.status(409).json({ reply: '', send: 'no', reason: out.reason });
-    return res.status(200).json({ reply: out.reply, send: 'yes' });
+    return res.status(200).json({ reply: out.reply, reply_param: templateParam(out.reply), send: 'yes' });
   } catch (err) {
     // Crash: say nothing (the CRM stops the run), log loudly.
     console.error('[crm-110] failed:', err.message);
@@ -133,4 +149,4 @@ module.exports = async (req, res) => {
 };
 
 module.exports.config = { maxDuration: 60 };
-module.exports._internal = { handle, buildEvent, digitsOf, allowedNumber, secretOk };
+module.exports._internal = { handle, buildEvent, digitsOf, allowedNumber, secretOk, templateParam };
