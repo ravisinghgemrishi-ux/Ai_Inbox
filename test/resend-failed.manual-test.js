@@ -1,4 +1,6 @@
 // 2026-10-21: lead alerts that Meta failed to deliver are re-sent on check-in.
+// 2026-11-03: these test the staff WhatsApp path, which is off by default now.
+process.env.STAFF_WHATSAPP_ALERTS = 'on';
 const assert = require('assert');
 process.env.REDIS_KV_REST_API_URL = 'https://fake-redis.test';
 process.env.REDIS_KV_REST_API_TOKEN = 'x';
